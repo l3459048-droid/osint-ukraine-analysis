@@ -1,0 +1,190 @@
+{
+  "system": {
+    "name": "OSINT Ukraine Analysis System",
+    "version": "1.0.0",
+    "description": "Système d'analyse automatique de documents OSINT sur la guerre en Ukraine",
+    "setup_date": "",
+    "last_update": "",
+    "base_path": ""
+  },
+  "google_drive": {
+    "enabled": true,
+    "main_folder_id": "",
+    "folder_map": {
+      "OSINT-Ukraine-Analysis": "",
+      "Raw Documents": "",
+      "Processed Documents": "",
+      "Sauvetage Combat": "",
+      "Drones": "",
+      "Guerre Electronique": "",
+      "Organisation PC": "",
+      "Formation Personnel": "",
+      "Artillerie": "",
+      "Autres": "",
+      "Syntheses": "",
+      "Archives": "",
+      "Logs": ""
+    },
+    "sync_enabled": true,
+    "sync_interval": 1800,
+    "max_file_size": 104857600,
+    "allowed_extensions": [".pdf", ".docx", ".txt", ".md", ".json"]
+  },
+  "osint_domains": {
+    "Sauvetage Combat": {
+      "keywords": [
+        "sauvetage", "combat", "medic", "evacuation", "blessé", "wounded", 
+        "casualty", "evac", "combat medic", "first aid", "triage",
+        "санитар", "эвакуация", "раненый", "медик"
+      ],
+      "aliases": ["medical", "rescue", "evacuation", "combat aid"],
+      "folder_id": "",
+      "color": "#ff6b6b",
+      "priority": 1
+    },
+    "Drones": {
+      "keywords": [
+        "drone", "UAV", "UAS", "quadcopter", "surveillance", "reconnaissance",
+        "FPV", "kamikaze", "Bayraktar", "switchblade", "mavic",
+        "дрон", "БПЛА", "квадрокоптер", "разведка"
+      ],
+      "aliases": ["unmanned", "aerial vehicle", "remote pilot"],
+      "folder_id": "",
+      "color": "#4ecdc4",
+      "priority": 2
+    },
+    "Guerre Electronique": {
+      "keywords": [
+        "guerre électronique", "EW", "electronic warfare", "brouillage", "jamming",
+        "radar", "communication", "signal", "frequency", "spectrum",
+        "РЭБ", "радиоэлектронная борьба", "глушение", "радар"
+      ],
+      "aliases": ["electronic", "signal intelligence", "SIGINT", "ELINT"],
+      "folder_id": "",
+      "color": "#45b7d1",
+      "priority": 2
+    },
+    "Organisation PC": {
+      "keywords": [
+        "PC", "poste commandement", "command post", "organisation", "structure", 
+        "hiérarchie", "hierarchy", "headquarters", "HQ", "brigade", "battalion",
+        "КП", "командный пункт", "штаб", "организация", "структура"
+      ],
+      "aliases": ["command", "control", "organization", "military structure"],
+      "folder_id": "",
+      "color": "#96ceb4",
+      "priority": 2
+    },
+    "Formation Personnel": {
+      "keywords": [
+        "formation", "entraînement", "training", "personnel", "instruction", 
+        "exercice", "drill", "soldier", "military education", "academy",
+        "обучение", "подготовка", "тренировка", "военнослужащий", "академия"
+      ],
+      "aliases": ["education", "military training", "personnel development"],
+      "folder_id": "",
+      "color": "#feca57",
+      "priority": 3
+    },
+    "Artillerie": {
+      "keywords": [
+        "artillerie", "artillery", "canon", "howitzer", "obus", "shell",
+        "bombardement", "bombing", "fire support", "HIMARS", "MLRS",
+        "артиллерия", "пушка", "гаубица", "снаряд", "обстрел", "РСЗО"
+      ],
+      "aliases": ["fire support", "long range", "rocket", "missile"],
+      "folder_id": "",
+      "color": "#ff9ff3",
+      "priority": 2
+    }
+  },
+  "processing": {
+    "enabled": true,
+    "auto_classify": true,
+    "auto_ocr": true,
+    "auto_translate": false,
+    "max_documents_per_batch": 50,
+    "processing_timeout": 300,
+    "backup_originals": true
+  },
+  "ocr": {
+    "enabled": true,
+    "service": "ocr.space",
+    "api_key": "",
+    "api_url": "https://api.ocr.space/parse/image",
+    "languages": ["fre", "eng", "rus", "ukr"],
+    "max_file_size": 10485760,
+    "output_format": "text"
+  },
+  "clustering": {
+    "enabled": true,
+    "algorithm": "keyword_based",
+    "min_similarity": 0.7,
+    "max_clusters": 10,
+    "auto_merge": true,
+    "similarity_threshold": 0.8
+  },
+  "synthesis": {
+    "enabled": true,
+    "max_points_per_domain": 20,
+    "min_points_per_domain": 5,
+    "auto_generate": true,
+    "update_frequency": "weekly",
+    "template_path": "Templates/Template-Synthese-Domaine.md",
+    "output_path": "Syntheses/"
+  },
+  "monitoring": {
+    "enabled": true,
+    "log_level": "INFO",
+    "log_rotation": true,
+    "max_log_size": 10485760,
+    "backup_count": 5,
+    "metrics_enabled": true,
+    "health_check_interval": 300
+  },
+  "paths": {
+    "raw_documents": "Raw Documents",
+    "processed_documents": "Processed Documents", 
+    "syntheses": "Syntheses",
+    "templates": "Templates",
+    "logs": "Logs",
+    "config": "Config",
+    "backup": "Backup",
+    "temp": "temp"
+  },
+  "security": {
+    "encrypt_sensitive_data": false,
+    "backup_encryption": false,
+    "access_control": false,
+    "audit_logs": true
+  },
+  "web_interface": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 8080,
+    "debug": false,
+    "public_access": false
+  },
+  "github_pages": {
+    "enabled": true,
+    "repository": "",
+    "branch": "main",
+    "path": "_site",
+    "auto_deploy": true,
+    "jekyll_config": "_config.yml"
+  },
+  "notifications": {
+    "enabled": false,
+    "email": {
+      "smtp_server": "",
+      "smtp_port": 587,
+      "username": "",
+      "password": "",
+      "recipients": []
+    },
+    "webhook": {
+      "url": "",
+      "secret": ""
+    }
+  }
+}

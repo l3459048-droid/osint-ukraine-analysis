@@ -1,0 +1,75 @@
+# Système OSINT Ukraine - Dépendances Python
+# Installation: pip install -r requirements.txt
+
+# === API Google Drive ===
+google-auth>=2.0.0
+google-auth-oauthlib>=0.5.0
+google-auth-httplib2>=0.1.0
+google-api-python-client>=2.0.0
+
+# === Traitement de fichiers ===
+PyPDF2>=2.0.0
+Pillow>=8.0.0
+python-docx>=0.8.11
+openpyxl>=3.0.0
+
+# === Web et requêtes ===
+requests>=2.25.0
+urllib3>=1.26.0
+beautifulsoup4>=4.10.0
+lxml>=4.6.0
+
+# === Configuration et environnement ===
+python-dotenv>=0.19.0
+configparser>=5.0.0
+pyyaml>=6.0
+
+# === Planification et monitoring ===
+schedule>=1.1.0
+watchdog>=2.1.0
+psutil>=5.8.0
+
+# === Traitement de texte et NLP ===
+nltk>=3.6.0
+textblob>=0.17.0
+fuzzywuzzy>=0.18.0
+python-levenshtein>=0.12.0
+
+# === Données et analyse ===
+pandas>=1.3.0
+numpy>=1.21.0
+scikit-learn>=1.0.0
+
+# === Interface et affichage ===
+tqdm>=4.62.0
+colorama>=0.4.4
+rich>=10.0.0
+click>=8.0.0
+
+# === Dates et temps ===
+python-dateutil>=2.8.0
+pytz>=2021.1
+
+# === Sécurité et cryptographie ===
+cryptography>=3.4.8
+bcrypt>=3.2.0
+
+# === Logs et debugging ===
+structlog>=21.1.0
+
+# === OCR (optionnel) ===
+pytesseract>=0.3.8
+opencv-python>=4.5.0
+
+# === Export et formats ===
+markdown>=3.3.0
+jinja2>=3.0.0
+
+# === Utilitaires ===
+pathlib2>=2.3.6
+typing-extensions>=3.10.0
+
+# === Développement (optionnel) ===
+pytest>=6.0.0
+black>=21.0.0
+flake8>=3.9.0
