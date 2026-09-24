@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.5
+# OSINT Ukraine Analysis — local-first v0.9.6
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.5
+## Что делает v0.9.6
 
 ```text
 папка документов
@@ -99,7 +99,11 @@ osint-local translate <SHA256> --from auto
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
 
-## Fast Translation v0.9.5
+## Fast Translation v0.9.6
+
+### Windows Unicode path fix
+
+SentencePiece tokenizer files are now read by Python and loaded from memory instead of being opened by the native library using their filesystem path. This avoids `NOT_FOUND` errors when the project path contains non-ASCII folders such as `проекты`.
 
 ### Tokenizer self-repair
 
