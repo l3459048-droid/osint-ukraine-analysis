@@ -104,7 +104,7 @@ class ActionManager:
                     int(counts.get("processed", 0))
                     + int(counts.get("duplicate", 0))
                     + int(result.get("embedded_chunks") or 0)
-                    + (1 if result.get("translated") else 0)
+                    + len(result.get("translated") or [])
                 )
                 self._state.message = "Library updated" if changed else "Library up to date"
             else:
@@ -181,14 +181,23 @@ class ActionManager:
             self._progress(0, 0, "Updating semantic index…")
             embedded = self.index_builder(self.pipeline.db, settings.search)
 
-        translated = None
+        translated: list[str] = []
         if bool(settings.translation.get("passive_enabled", True)):
-            self._progress(0, 0, "Checking translation queue…")
-            translated = next_passive_translation(
-                settings,
-                self.pipeline.db,
-                progress=lambda current, total, message: self._progress(current, total, message),
-            )
+            max_per_cycle = max(1, min(5, int(settings.translation.get("max_per_cycle", 1))))
+            for item_index in range(max_per_cycle):
+                self._progress(
+                    item_index,
+                    max_per_cycle,
+                    f"Checking translation queue… {item_index}/{max_per_cycle}",
+                )
+                item = next_passive_translation(
+                    settings,
+                    self.pipeline.db,
+                    progress=lambda current, total, message: self._progress(current, total, message),
+                )
+                if not item:
+                    break
+                translated.append(item["source_path"])
 
         if not results and not embedded and not translated:
             self._progress(0, 0, "Library is up to date")
@@ -196,7 +205,7 @@ class ActionManager:
             "files_seen": len(results),
             "counts": counts,
             "embedded_chunks": embedded,
-            "translated": translated["source_path"] if translated else None,
+            "translated": translated,
         }
 
     def _progress(self, current: int, total: int, message: str) -> None:
