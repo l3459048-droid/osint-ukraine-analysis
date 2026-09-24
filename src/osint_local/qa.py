@@ -158,11 +158,11 @@ def _mode_limits(mode: str, base_top_k: int, base_context: int) -> tuple[int, in
     if mode == "quick":
         return base_top_k, base_context, 3
     if mode == "deep":
-        return min(16, max(8, base_top_k + 4)), min(18000, max(12000, base_context)), 3
+        return min(16, max(8, base_top_k + 4)), min(12000, max(10000, base_context)), 3
     if mode == "compare":
-        return min(18, max(10, base_top_k + 6)), min(18000, max(14000, base_context)), 2
+        return min(18, max(10, base_top_k + 6)), min(12000, max(11000, base_context)), 2
     if mode == "contradictions":
-        return min(18, max(10, base_top_k + 6)), min(18000, max(14000, base_context)), 2
+        return min(18, max(10, base_top_k + 6)), min(12000, max(11000, base_context)), 2
     raise RuntimeError(f"Unknown Ask mode: {mode}")
 
 
