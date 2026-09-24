@@ -46,7 +46,7 @@ def main() -> int:
     search = sub.add_parser("search", help="Search indexed document chunks")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
-    search.add_argument("--mode", choices=["auto", "semantic", "lexical"], default="auto")
+    search.add_argument("--mode", choices=["auto", "hybrid", "semantic", "lexical"], default="auto")
     search.add_argument("--json", action="store_true", dest="as_json")
 
     translate_cmd = sub.add_parser("translate", help="Translate one English/Ukrainian document to Russian offline")
@@ -55,6 +55,12 @@ def main() -> int:
 
     ask_cmd = sub.add_parser("ask", help="Ask a local Ollama model about all indexed documents")
     ask_cmd.add_argument("question")
+    ask_cmd.add_argument(
+        "--mode",
+        choices=["quick", "deep", "compare", "contradictions"],
+        default="quick",
+        help="Analysis mode",
+    )
 
     serve_cmd = sub.add_parser("serve", help="Run the local Web UI")
     serve_cmd.add_argument("--host", default=None, help="Bind address (default from config)")
@@ -143,7 +149,13 @@ def main() -> int:
 
         if args.command == "ask":
             try:
-                result = ask_documents(pipeline.db, args.question, settings.search, settings.qa)
+                result = ask_documents(
+                    pipeline.db,
+                    args.question,
+                    settings.search,
+                    settings.qa,
+                    analysis_mode=args.mode,
+                )
             except RuntimeError as exc:
                 print(str(exc))
                 return 2
