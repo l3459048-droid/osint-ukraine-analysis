@@ -96,34 +96,57 @@ def search_chunks(
     model = str(config.get("model") or DEFAULT_MODEL)
     semantic_enabled = bool(config.get("semantic_enabled", True))
 
-    if mode not in {"auto", "semantic", "lexical"}:
+    if mode not in {"auto", "hybrid", "semantic", "lexical"}:
         raise ValueError(f"Unknown search mode: {mode}")
 
     embedded = db.embedding_count(model)
     total_chunks = db.chunk_count()
     semantic_ready = total_chunks > 0 and embedded >= total_chunks
 
-    if mode in {"auto", "semantic"} and semantic_enabled and semantic_ready:
+    if mode in {"auto", "hybrid"} and semantic_enabled and semantic_ready:
         try:
-            encoder = encoder or SentenceTransformerEncoder(model)
-            query_vector = _normalize_vector(encoder.encode([query])[0])
-            scored: list[SearchHit] = []
-            for row in db.iter_embeddings(model):
-                vector = _blob_to_vector(row["vector"])
-                score = _dot(query_vector, vector)
-                scored.append(_hit(row, score, "semantic"))
-            return sorted(scored, key=lambda hit: hit.score, reverse=True)[:limit]
+            candidate_multiplier = max(2, min(8, int(config.get("hybrid_candidate_multiplier", 3))))
+            candidate_limit = max(limit * candidate_multiplier, min(30, total_chunks))
+            semantic_hits = _semantic_search(
+                db, query, model, candidate_limit, encoder=encoder
+            )
+            lexical_hits = _lexical_search(db, query, candidate_limit)
+            return _hybrid_rerank(query, semantic_hits, lexical_hits, limit, config)
         except RuntimeError:
-            if mode == "semantic":
+            if mode == "hybrid":
                 raise
 
-    if mode == "semantic":
-        if embedded == 0:
+    if mode == "semantic" and semantic_enabled and semantic_ready:
+        return _semantic_search(db, query, model, limit, encoder=encoder)
+
+    if mode in {"semantic", "hybrid"}:
+        if not semantic_enabled:
+            detail = "Semantic search is disabled."
+        elif embedded == 0:
             detail = "No semantic embeddings are indexed for the configured model."
         else:
             detail = f"Semantic index is incomplete ({embedded}/{total_chunks} chunks embedded)."
         raise RuntimeError(detail + " Run: osint-local index")
+
     return _lexical_search(db, query, limit)
+
+
+def _semantic_search(
+    db: Database,
+    query: str,
+    model: str,
+    limit: int,
+    *,
+    encoder: Encoder | None = None,
+) -> list[SearchHit]:
+    encoder = encoder or SentenceTransformerEncoder(model)
+    query_vector = _normalize_vector(encoder.encode([query])[0])
+    scored: list[SearchHit] = []
+    for row in db.iter_embeddings(model):
+        vector = _blob_to_vector(row["vector"])
+        score = _dot(query_vector, vector)
+        scored.append(_hit(row, score, "semantic"))
+    return sorted(scored, key=lambda hit: hit.score, reverse=True)[:limit]
 
 
 def _lexical_search(db: Database, query: str, limit: int) -> list[SearchHit]:
@@ -147,6 +170,67 @@ def _lexical_search(db: Database, query: str, limit: int) -> list[SearchHit]:
         score = coverage + min(0.5, density)
         hits.append(_hit(row, score, "lexical"))
     return sorted(hits, key=lambda hit: hit.score, reverse=True)[:limit]
+
+
+def _hybrid_rerank(
+    query: str,
+    semantic_hits: list[SearchHit],
+    lexical_hits: list[SearchHit],
+    limit: int,
+    config: dict,
+) -> list[SearchHit]:
+    """Fuse semantic and lexical rankings, then apply a cheap exact-match rerank."""
+    rrf_k = max(10, min(200, int(config.get("hybrid_rrf_k", 60))))
+    semantic_weight = max(0.0, float(config.get("hybrid_semantic_weight", 1.0)))
+    lexical_weight = max(0.0, float(config.get("hybrid_lexical_weight", 1.0)))
+    terms = _terms(query)
+    phrase = query.casefold().strip()
+
+    scores: dict[tuple[str, int | None, int], float] = {}
+    hits: dict[tuple[str, int | None, int], SearchHit] = {}
+
+    for rank, hit in enumerate(semantic_hits, 1):
+        key = _hit_key(hit)
+        hits[key] = hit
+        scores[key] = scores.get(key, 0.0) + semantic_weight / (rrf_k + rank)
+
+    for rank, hit in enumerate(lexical_hits, 1):
+        key = _hit_key(hit)
+        hits[key] = hit
+        scores[key] = scores.get(key, 0.0) + lexical_weight / (rrf_k + rank)
+
+    for key, hit in hits.items():
+        lowered = hit.text.casefold()
+        if terms:
+            coverage = sum(1 for term in terms if term in lowered) / len(terms)
+            scores[key] += 0.01 * coverage
+        if len(phrase) >= 4 and phrase in lowered:
+            scores[key] += 0.012
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    if not ranked:
+        return []
+
+    top_score = ranked[0][1] or 1.0
+    output: list[SearchHit] = []
+    for key, raw_score in ranked[:limit]:
+        hit = hits[key]
+        output.append(
+            SearchHit(
+                score=float(raw_score / top_score),
+                backend="hybrid",
+                document_sha256=hit.document_sha256,
+                source_path=hit.source_path,
+                page=hit.page,
+                chunk_index=hit.chunk_index,
+                text=hit.text,
+            )
+        )
+    return output
+
+
+def _hit_key(hit: SearchHit) -> tuple[str, int | None, int]:
+    return (hit.document_sha256, hit.page, hit.chunk_index)
 
 
 def _terms(text: str) -> list[str]:
