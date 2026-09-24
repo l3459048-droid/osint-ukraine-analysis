@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from osint_local.chunking import split_pages
 from osint_local.config import load_settings
 from osint_local.pipeline import LocalPipeline
-from osint_local.search import SearchIndex, _split_pages
+from osint_local.search import build_embeddings, search_chunks
 
 
 def make_config(tmp_path: Path) -> Path:
@@ -22,7 +23,8 @@ def make_config(tmp_path: Path) -> Path:
             "semantic_enabled": True,
             "model": "test-model",
             "batch_size": 4,
-        }
+            "auto_embed": False,
+        },
     }
     path = tmp_path / "config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
@@ -44,11 +46,11 @@ class FakeEncoder:
 
 
 def test_page_markers_are_preserved():
-    pages = _split_pages("--- PAGE 1 ---\nalpha\n\n--- PAGE 2 ---\nbravo")
+    pages = split_pages("--- PAGE 1 ---\nalpha\n\n--- PAGE 2 ---\nbravo")
     assert pages == [(1, "alpha"), (2, "bravo")]
 
 
-def test_v01_text_artifact_is_searchable_without_reprocessing(tmp_path: Path):
+def test_processed_text_is_searchable_lexically(tmp_path: Path):
     settings = load_settings(make_config(tmp_path))
     settings.input_dir.mkdir(parents=True)
     source = settings.input_dir / "report.txt"
@@ -58,39 +60,50 @@ def test_v01_text_artifact_is_searchable_without_reprocessing(tmp_path: Path):
     try:
         processed = pipeline.process_file(source)
         assert processed.status == "processed"
-    finally:
-        pipeline.close()
-
-    with SearchIndex(settings) as index:
-        hits = index.search("FPV logistics", mode="lexical")
+        hits = search_chunks(
+            pipeline.db,
+            "FPV logistics",
+            settings.search,
+            mode="lexical",
+        )
         assert hits
         assert hits[0].source_path == "report.txt"
         assert hits[0].backend == "lexical"
+    finally:
+        pipeline.close()
 
 
 def test_semantic_index_uses_existing_chunks(tmp_path: Path):
     settings = load_settings(make_config(tmp_path))
     settings.input_dir.mkdir(parents=True)
-    (settings.input_dir / "drones.txt").write_text("FPV drone team operates forward.", encoding="utf-8")
-    (settings.input_dir / "artillery.txt").write_text("Artillery conducts fire missions.", encoding="utf-8")
+    (settings.input_dir / "drones.txt").write_text(
+        "FPV drone team operates forward.", encoding="utf-8"
+    )
+    (settings.input_dir / "artillery.txt").write_text(
+        "Artillery conducts fire missions.", encoding="utf-8"
+    )
 
     pipeline = LocalPipeline(settings)
     try:
         pipeline.scan()
-    finally:
-        pipeline.close()
-
-    with SearchIndex(settings) as index:
-        count = index.build_embeddings(encoder=FakeEncoder())
+        count = build_embeddings(
+            pipeline.db,
+            settings.search,
+            encoder=FakeEncoder(),
+        )
         assert count == 2
-        hits = index.search(
+        hits = search_chunks(
+            pipeline.db,
             "unmanned aircraft tactics",
+            settings.search,
             mode="semantic",
             encoder=FakeEncoder(),
             limit=2,
         )
         assert hits[0].source_path == "drones.txt"
         assert hits[0].score > hits[1].score
+    finally:
+        pipeline.close()
 
 
 def test_auto_search_falls_back_to_lexical_when_index_is_incomplete(tmp_path: Path):
@@ -101,21 +114,21 @@ def test_auto_search_falls_back_to_lexical_when_index_is_incomplete(tmp_path: Pa
     pipeline = LocalPipeline(settings)
     try:
         pipeline.scan()
-    finally:
-        pipeline.close()
+        build_embeddings(pipeline.db, settings.search, encoder=FakeEncoder())
 
-    with SearchIndex(settings) as index:
-        index.build_embeddings(encoder=FakeEncoder())
-
-    (settings.input_dir / "two.txt").write_text("FPV logistics adaptation", encoding="utf-8")
-    pipeline = LocalPipeline(settings)
-    try:
+        (settings.input_dir / "two.txt").write_text(
+            "FPV logistics adaptation", encoding="utf-8"
+        )
         pipeline.scan()
-    finally:
-        pipeline.close()
 
-    with SearchIndex(settings) as index:
-        hits = index.search("FPV logistics", mode="auto")
+        hits = search_chunks(
+            pipeline.db,
+            "FPV logistics",
+            settings.search,
+            mode="auto",
+        )
         assert hits
         assert hits[0].backend == "lexical"
         assert hits[0].source_path == "two.txt"
+    finally:
+        pipeline.close()
