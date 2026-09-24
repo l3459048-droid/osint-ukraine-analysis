@@ -89,13 +89,14 @@ class AskManager:
                 "error": "",
                 "model": "",
             }
+            initial = dict(self._state)
             threading.Thread(
                 target=self._worker,
                 args=(question,),
                 name="osint-local-ask",
                 daemon=True,
             ).start()
-            return dict(self._state)
+            return initial
 
     def _progress(self, stage: str) -> None:
         messages = {
