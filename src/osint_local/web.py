@@ -21,7 +21,7 @@ from .background import BackgroundLoop
 from .chat import chat_local
 from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
-from .fast_translation import fast_translation_available
+from .fast_translation import fast_ready_pairs, fast_translation_available
 from .pipeline import LocalPipeline
 from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
@@ -642,8 +642,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.server.csrf_token,
                 sha256,
                 self.db.list_translations(sha256),
-                available=argos_available(),
-                pairs=installed_pairs() if argos_available() else set(),
+                available=argos_available() or fast_translation_available(),
+                pairs=(installed_pairs() if argos_available() else set()) | (
+                    fast_ready_pairs(self.settings) if fast_translation_available() else set()
+                ),
                 action=self.server.actions.snapshot(),
             ),
             '<section class="panel"><div class="panel-head"><h2>Extracted chunks</h2></div>',
