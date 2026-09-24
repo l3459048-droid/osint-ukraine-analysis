@@ -3,9 +3,20 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from .fast_translation import (
+    clear_fast_checkpoint,
+    fast_model_ready,
+    fast_ready_pairs,
+    fast_translation_available,
+    load_fast_benchmark,
+    prepare_fast_model,
+    translate_sections_fast,
+)
 
 PAGE_RE = re.compile(r"(?:^|\n)\s*--- PAGE (\d+) ---\s*\n", re.MULTILINE)
 SUPPORTED_LANGS = {"en": "English", "ru": "Russian", "uk": "Ukrainian"}
@@ -54,6 +65,8 @@ def translate_document(
     translator: Callable[[str, str, str], str] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
     allow_model_install: bool = True,
+    should_pause: Callable[[], bool] | None = None,
+    engine: str | None = None,
 ) -> dict:
     doc = db.get_document(sha256)
     if not doc:
@@ -61,6 +74,7 @@ def translate_document(
     text_path = settings.text_dir / f"{sha256}.txt"
     if not text_path.is_file():
         raise RuntimeError("Extracted text is missing. Run Scan first.")
+
     text = text_path.read_text(encoding="utf-8", errors="replace")
     src = detect_language(text) if source_lang == "auto" else source_lang
     dst = target_lang
@@ -71,54 +85,89 @@ def translate_document(
     if (src, dst) not in ALLOWED_PAIRS:
         raise RuntimeError("Translation is limited to English→Russian and Ukrainian→Russian")
 
-    custom_translator = translator is not None
-    if translator is None:
-        if not argos_available():
-            raise RuntimeError("Offline translation is not installed. Install: pip install -e '.[translate]'")
-        if (src, dst) not in installed_pairs():
-            if not allow_model_install or not bool(settings.translation.get("auto_install_models", True)):
-                raise RuntimeError(f"Argos language pair {src}→{dst} is not installed")
-            if progress:
-                progress(0, 0, f"Installing language model {src}→{dst}…")
-            from argostranslate import package as argos_package
-            argos_package.update_package_index()
-            available = argos_package.get_available_packages()
-            direct = next((p for p in available if p.from_code == src and p.to_code == dst), None)
-            if direct is not None:
-                argos_package.install_from_path(direct.download())
-            elif src != "en" and dst != "en":
-                # Argos can pivot through installed intermediate languages. Ukrainian→Russian
-                # commonly uses uk→en plus en→ru when no direct package exists.
-                route = []
-                for a, b in ((src, "en"), ("en", dst)):
-                    package = next((p for p in available if p.from_code == a and p.to_code == b), None)
-                    if package is None:
-                        raise RuntimeError(f"No Argos package route is available for {src}→{dst}")
-                    route.append(package)
-                for package in route:
-                    argos_package.install_from_path(package.download())
-            else:
-                raise RuntimeError(f"No Argos language model is available for {src}→{dst}")
-        from argostranslate import translate as argos_translate
-        translator = lambda value, a, b: argos_translate.translate(value, a, b)
-
     sections = _sections(text)
-    units: list[tuple[int | None, str]] = []
-    for page, section_text in sections:
-        for piece in _split_text(section_text, int(settings.translation.get("max_chars_per_request", 1800))):
-            units.append((page, piece))
-    if not units:
-        units = [(None, text)]
+    if not sections:
+        sections = [(None, text)]
 
-    translated: list[tuple[int | None, str]] = []
-    total = len(units)
-    if progress:
-        progress(0, total, "Preparing translation…")
-    for index, (page, piece) in enumerate(units, 1):
-        translated.append((page, translator(piece, src, dst)))
-        if progress:
-            label = f"Page {page}" if page is not None else "Document"
-            progress(index, total, f"Translating {label}")
+    selected_engine = str(engine or settings.translation.get("engine") or "auto").strip().casefold()
+    if selected_engine not in {"auto", "fast", "argos"}:
+        selected_engine = "auto"
+
+    custom_translator = translator is not None
+    engine_name = "custom"
+    engine_meta: dict = {}
+
+    if custom_translator:
+        translated = _translate_sections_legacy(
+            sections,
+            src,
+            dst,
+            translator,
+            int(settings.translation.get("max_chars_per_request", 1800)),
+            progress=progress,
+            should_pause=should_pause,
+        )
+    else:
+        translated = None
+
+        wants_fast = selected_engine in {"auto", "fast"}
+        if wants_fast and fast_translation_available():
+            if not fast_model_ready(settings, src, dst) and allow_model_install:
+                prepare_fast_model(
+                    settings,
+                    src,
+                    dst,
+                    progress=progress,
+                    run_benchmark=True,
+                )
+            if fast_model_ready(settings, src, dst):
+                translated, fast_stats = translate_sections_fast(
+                    settings,
+                    sha256,
+                    sections,
+                    src,
+                    dst,
+                    progress=progress,
+                    should_pause=should_pause,
+                )
+                engine_name = fast_stats.engine
+                engine_meta = {
+                    "model": fast_stats.model,
+                    "compute_type": fast_stats.compute_type,
+                    "inter_threads": fast_stats.inter_threads,
+                    "intra_threads": fast_stats.intra_threads,
+                    "pages_per_minute": round(fast_stats.pages_per_minute, 2),
+                    "elapsed_seconds": round(fast_stats.elapsed_seconds, 3),
+                    "chars_translated": fast_stats.chars_translated,
+                }
+            elif selected_engine == "fast":
+                raise RuntimeError(
+                    f"Fast model {src}→{dst} is not prepared. Prepare it in System first."
+                )
+        elif selected_engine == "fast":
+            raise RuntimeError(
+                "Fast Translation dependencies are missing. Run the updater or install: "
+                "pip install -e '.[fasttranslate]'"
+            )
+
+        if translated is None:
+            argos_translator = _get_argos_translator(
+                src,
+                dst,
+                settings,
+                allow_model_install=allow_model_install,
+                progress=progress,
+            )
+            translated = _translate_sections_legacy(
+                sections,
+                src,
+                dst,
+                argos_translator,
+                int(settings.translation.get("max_chars_per_request", 1800)),
+                progress=progress,
+                should_pause=should_pause,
+            )
+            engine_name = "argos-translate"
 
     output_dir = settings.translations_dir / dst
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -127,16 +176,18 @@ def translate_document(
     created_at = datetime.now(timezone.utc).isoformat()
     body = _render_markdown(doc["source_path"], sha256, src, dst, created_at, translated)
     _atomic_write(output_path, body)
-    meta_path = output_path.with_suffix(output_path.suffix + ".json")
+
     metadata = {
         "document_sha256": sha256,
         "source_path": doc["source_path"],
         "source_lang": src,
         "target_lang": dst,
         "created_at": created_at,
-        "engine": "custom" if custom_translator else "argos-translate",
+        "engine": engine_name,
         "output_path": str(output_path),
+        **engine_meta,
     }
+    meta_path = output_path.with_suffix(output_path.suffix + ".json")
     _atomic_write(meta_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     db.save_translation(
         sha256=sha256,
@@ -144,9 +195,98 @@ def translate_document(
         target_lang=dst,
         output_path=str(output_path),
         created_at=created_at,
-        engine="custom" if custom_translator else "argos-translate",
+        engine=engine_name,
     )
+    if engine_name.startswith("ctranslate2"):
+        clear_fast_checkpoint(settings, sha256, dst)
     return metadata
+
+
+def _get_argos_translator(
+    src: str,
+    dst: str,
+    settings,
+    *,
+    allow_model_install: bool,
+    progress: Callable[[int, int, str], None] | None,
+) -> Callable[[str, str, str], str]:
+    if not argos_available():
+        raise RuntimeError(
+            "Offline translation is not installed. Run the updater or install: pip install -e '.[translate]'"
+        )
+    if (src, dst) not in installed_pairs():
+        if not allow_model_install or not bool(settings.translation.get("auto_install_models", True)):
+            raise RuntimeError(f"Argos language pair {src}→{dst} is not installed")
+        if progress:
+            progress(0, 0, f"Installing Argos language model {src}→{dst}…")
+        from argostranslate import package as argos_package
+
+        argos_package.update_package_index()
+        available = argos_package.get_available_packages()
+        direct = next((p for p in available if p.from_code == src and p.to_code == dst), None)
+        if direct is not None:
+            argos_package.install_from_path(direct.download())
+        elif src != "en" and dst != "en":
+            route = []
+            for a, b in ((src, "en"), ("en", dst)):
+                package = next((p for p in available if p.from_code == a and p.to_code == b), None)
+                if package is None:
+                    raise RuntimeError(f"No Argos package route is available for {src}→{dst}")
+                route.append(package)
+            for package in route:
+                argos_package.install_from_path(package.download())
+        else:
+            raise RuntimeError(f"No Argos language model is available for {src}→{dst}")
+
+    from argostranslate import translate as argos_translate
+
+    return lambda value, a, b: argos_translate.translate(value, a, b)
+
+
+def _translate_sections_legacy(
+    sections: list[tuple[int | None, str]],
+    src: str,
+    dst: str,
+    translator: Callable[[str, str, str], str],
+    max_chars: int,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+    should_pause: Callable[[], bool] | None = None,
+) -> list[tuple[int | None, str]]:
+    units: list[tuple[int | None, str]] = []
+    for page, section_text in sections:
+        for piece in _split_text(section_text, max_chars):
+            units.append((page, piece))
+    if not units:
+        units = sections
+
+    translated: list[tuple[int | None, str]] = []
+    total = len(units)
+    if progress:
+        progress(0, total, "Preparing translation…")
+    for index, (page, piece) in enumerate(units, 1):
+        _wait_while_paused(should_pause, progress, index - 1, total)
+        translated.append((page, translator(piece, src, dst)))
+        if progress:
+            label = f"Page {page}" if page is not None else "Document"
+            progress(index, total, f"Translating {label}")
+    return translated
+
+
+def _wait_while_paused(
+    should_pause: Callable[[], bool] | None,
+    progress: Callable[[int, int, str], None] | None,
+    current: int,
+    total: int,
+) -> None:
+    if should_pause is None:
+        return
+    announced = False
+    while should_pause():
+        if progress and not announced:
+            progress(current, total, "Translation paused while Chat/Ask is active")
+            announced = True
+        time.sleep(0.25)
 
 
 def _sections(text: str) -> list[tuple[int | None, str]]:
@@ -172,7 +312,10 @@ def _split_text(text: str, max_chars: int) -> list[str]:
     result: list[str] = []
     current = ""
     for paragraph in paragraphs:
-        pieces = [paragraph[i:i + max_chars] for i in range(0, len(paragraph), max_chars)] if len(paragraph) > max_chars else [paragraph]
+        pieces = [
+            paragraph[i:i + max_chars]
+            for i in range(0, len(paragraph), max_chars)
+        ] if len(paragraph) > max_chars else [paragraph]
         for piece in pieces:
             candidate = piece if not current else current + "\n\n" + piece
             if len(candidate) <= max_chars:
@@ -186,7 +329,14 @@ def _split_text(text: str, max_chars: int) -> list[str]:
     return result
 
 
-def _render_markdown(source_path: str, sha256: str, src: str, dst: str, created_at: str, units: list[tuple[int | None, str]]) -> str:
+def _render_markdown(
+    source_path: str,
+    sha256: str,
+    src: str,
+    dst: str,
+    created_at: str,
+    units: list[tuple[int | None, str]],
+) -> str:
     lines = [
         f"# Translation — {Path(source_path).name}",
         "",
@@ -197,10 +347,10 @@ def _render_markdown(source_path: str, sha256: str, src: str, dst: str, created_
         "",
     ]
     last_page = object()
-    for page, text in units:
+    for page, translated_text in units:
         if page != last_page and page is not None:
             lines.extend([f"## Page {page}", ""])
-        lines.extend([text.strip(), ""])
+        lines.extend([translated_text.strip(), ""])
         last_page = page
     return "\n".join(lines).rstrip() + "\n"
 
@@ -213,9 +363,12 @@ def _atomic_write(path: Path, content: str) -> None:
 
 def translation_queue_status(settings, db, *, available_pairs=None, limit: int = 500) -> dict:
     """Return lightweight EN/UK → RU translation queue statistics."""
-    pairs = set(available_pairs) if available_pairs is not None else (
+    argos_pairs = set(available_pairs) if available_pairs is not None else (
         installed_pairs() if argos_available() else set()
     )
+    fast_pairs = fast_ready_pairs(settings) if fast_translation_available() else set()
+    ready_pairs = argos_pairs | fast_pairs
+
     eligible = 0
     translated = 0
     ready = 0
@@ -227,12 +380,14 @@ def translation_queue_status(settings, db, *, available_pairs=None, limit: int =
     for doc in db.list_documents(limit=max(1, min(5000, int(limit)))):
         scanned += 1
         sha256 = doc["sha256"]
-        text_path = settings.text_dir / f"{sha256}.txt"
-        if not text_path.is_file():
-            unknown += 1
-            continue
-        text = text_path.read_text(encoding="utf-8", errors="replace")
-        src = detect_language(text)
+        src = str(doc["language"] or "").strip().casefold()
+        if not src:
+            text_path = settings.text_dir / f"{sha256}.txt"
+            if not text_path.is_file():
+                unknown += 1
+                continue
+            src = detect_language(text_path.read_text(encoding="utf-8", errors="replace"))
+
         if src == "ru":
             russian += 1
             continue
@@ -243,11 +398,16 @@ def translation_queue_status(settings, db, *, available_pairs=None, limit: int =
         eligible += 1
         if db.get_translation(sha256, src, "ru"):
             translated += 1
-        elif (src, "ru") in pairs:
+        elif (src, "ru") in ready_pairs:
             ready += 1
         else:
             blocked += 1
 
+    benchmarks = {
+        src: load_fast_benchmark(settings, src, "ru")
+        for src in ("en", "uk")
+        if fast_model_ready(settings, src, "ru")
+    }
     return {
         "scanned": scanned,
         "eligible": eligible,
@@ -257,30 +417,62 @@ def translation_queue_status(settings, db, *, available_pairs=None, limit: int =
         "blocked": blocked,
         "russian": russian,
         "unknown": unknown,
-        "pairs": sorted(f"{src}->{dst}" for src, dst in pairs if dst == "ru"),
+        "pairs": sorted(f"{src}->{dst}" for src, dst in ready_pairs if dst == "ru"),
+        "engine": str(settings.translation.get("engine") or "auto"),
+        "fast_available": fast_translation_available(),
+        "fast_pairs": sorted(f"{src}->{dst}" for src, dst in fast_pairs),
+        "fast_benchmarks": benchmarks,
     }
 
 
-def next_passive_translation(settings, db, *, progress=None, translator=None, available_pairs=None) -> dict | None:
-    """Translate at most one EN/UK document to Russian without installing models in the background."""
-    if translator is None and not argos_available():
-        return None
-    pairs = set(available_pairs) if available_pairs is not None else installed_pairs()
+def next_passive_translation(
+    settings,
+    db,
+    *,
+    progress=None,
+    translator=None,
+    available_pairs=None,
+    should_pause: Callable[[], bool] | None = None,
+) -> dict | None:
+    """Translate at most one EN/UK document without downloading models in the background."""
+    argos_pairs = set(available_pairs) if available_pairs is not None else (
+        installed_pairs() if argos_available() else set()
+    )
+    fast_pairs = fast_ready_pairs(settings) if fast_translation_available() else set()
+    selected_engine = str(settings.translation.get("engine") or "auto").strip().casefold()
+
     for doc in db.list_documents(limit=5000):
         sha256 = doc["sha256"]
+        src = str(doc["language"] or "").strip().casefold()
         text_path = settings.text_dir / f"{sha256}.txt"
-        if not text_path.is_file():
-            continue
-        text = text_path.read_text(encoding="utf-8", errors="replace")
-        src = detect_language(text)
+        if not src:
+            if not text_path.is_file():
+                continue
+            src = detect_language(text_path.read_text(encoding="utf-8", errors="replace"))
         if src not in {"en", "uk"}:
             continue
         if db.get_translation(sha256, src, "ru"):
             continue
-        if translator is None and (src, "ru") not in pairs:
-            continue
+
+        pair = (src, "ru")
+        if translator is None:
+            if selected_engine == "fast" and pair not in fast_pairs:
+                continue
+            if selected_engine == "argos" and pair not in argos_pairs:
+                continue
+            if selected_engine == "auto" and pair not in fast_pairs and pair not in argos_pairs:
+                continue
+
         return translate_document(
-            settings, db, sha256, source_lang=src, target_lang="ru",
-            translator=translator, progress=progress, allow_model_install=False,
+            settings,
+            db,
+            sha256,
+            source_lang=src,
+            target_lang="ru",
+            translator=translator,
+            progress=progress,
+            allow_model_install=False,
+            should_pause=should_pause,
+            engine=selected_engine,
         )
     return None
