@@ -21,6 +21,7 @@ from .background import BackgroundLoop
 from .chat import chat_local
 from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
+from .fast_translation import fast_translation_available
 from .pipeline import LocalPipeline
 from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
@@ -61,11 +62,32 @@ LOG = logging.getLogger("osint_local.web")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+class InteractiveGate:
+    """Reference-counted marker for active Chat/Ask work."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._count = 0
+
+    def acquire(self) -> None:
+        with self._lock:
+            self._count += 1
+
+    def release(self) -> None:
+        with self._lock:
+            self._count = max(0, self._count - 1)
+
+    def active(self) -> bool:
+        with self._lock:
+            return self._count > 0
+
+
 class AskManager:
     """Run one local Q&A job in the background so the browser request stays short."""
 
-    def __init__(self, pipeline: LocalPipeline) -> None:
+    def __init__(self, pipeline: LocalPipeline, gate: InteractiveGate | None = None) -> None:
         self.pipeline = pipeline
+        self.gate = gate
         self._lock = threading.RLock()
         self._state = {
             "status": "idle",
@@ -102,8 +124,10 @@ class AskManager:
                 "filters": dict(filters or {}),
             }
             initial = dict(self._state)
+            if self.gate is not None:
+                self.gate.acquire()
             threading.Thread(
-                target=self._worker,
+                target=self._worker_guarded,
                 args=(question, analysis_mode, dict(filters or {})),
                 name="osint-local-ask",
                 daemon=True,
@@ -120,6 +144,13 @@ class AskManager:
         with self._lock:
             if self._state.get("status") == "running":
                 self._state["message"] = messages.get(stage, stage)
+
+    def _worker_guarded(self, question: str, analysis_mode: str, filters: dict) -> None:
+        try:
+            self._worker(question, analysis_mode, filters)
+        finally:
+            if self.gate is not None:
+                self.gate.release()
 
     def _worker(self, question: str, analysis_mode: str, filters: dict) -> None:
         try:
@@ -180,8 +211,9 @@ class AskManager:
 class ChatManager:
     """Run general local Ollama chat without document retrieval."""
 
-    def __init__(self, pipeline: LocalPipeline) -> None:
+    def __init__(self, pipeline: LocalPipeline, gate: InteractiveGate | None = None) -> None:
         self.pipeline = pipeline
+        self.gate = gate
         self._lock = threading.RLock()
         self._history: list[dict[str, str]] = []
         self._state = {
@@ -216,8 +248,10 @@ class ChatManager:
                 "model": self._state.get("model") or "",
             }
             initial = dict(self._state)
+            if self.gate is not None:
+                self.gate.acquire()
             threading.Thread(
-                target=self._worker,
+                target=self._worker_guarded,
                 args=(message, history),
                 name="osint-local-chat",
                 daemon=True,
@@ -237,6 +271,13 @@ class ChatManager:
                 "model": self._state.get("model") or "",
             }
             return self.snapshot()
+
+    def _worker_guarded(self, message: str, history: list[dict[str, str]]) -> None:
+        try:
+            self._worker(message, history)
+        finally:
+            if self.gate is not None:
+                self.gate.release()
 
     def _worker(self, message: str, history: list[dict[str, str]]) -> None:
         try:
@@ -274,9 +315,10 @@ class DashboardServer(ThreadingHTTPServer):
         super().__init__(address, DashboardHandler)
         self.pipeline = pipeline
         self.settings = pipeline.settings
-        self.actions = ActionManager(pipeline)
-        self.ask = AskManager(pipeline)
-        self.chat = ChatManager(pipeline)
+        self.interactive = InteractiveGate()
+        self.actions = ActionManager(pipeline, interactive_busy=self.interactive.active)
+        self.ask = AskManager(pipeline, self.interactive)
+        self.chat = ChatManager(pipeline, self.interactive)
         self.csrf_token = secrets.token_urlsafe(32)
         self.folder_opener = folder_opener
         self.folder_picker = folder_picker
@@ -359,6 +401,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._open_translations_action()
             elif path == "/actions/translate":
                 self._translate_action()
+            elif path == "/actions/prepare-fast-translation":
+                self._prepare_fast_translation_action()
             elif path == "/api/ask":
                 self._start_ask_action()
             elif path == "/api/chat":
@@ -671,6 +715,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "index_pending": max(0, int(stats["chunks"]) - int(stats["embedding_count"])),
             "translation_queue": queue,
             "argos_available": argos_available(),
+            "fast_translation_available": fast_translation_available(),
+            "interactive_busy": self.server.interactive.active(),
             "ollama_reachable": ollama_reachable,
             "ollama_error": ollama_error,
             "ollama_models": models,
@@ -884,8 +930,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if source_lang not in {"auto", "en", "uk"}:
             self._action_response({"error": "Translation is limited to English/Ukrainian → Russian"}, status=HTTPStatus.BAD_REQUEST)
             return
-        if not argos_available():
-            self._action_response({"error": "Offline translation is not installed. Install: pip install -e '.[translate]'"}, status=HTTPStatus.BAD_REQUEST)
+        if not argos_available() and not fast_translation_available():
+            self._action_response(
+                {"error": "No offline translation engine is installed. Run UPDATE_OSINT.cmd first."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         try:
             action = self.server.actions.start_translate(sha256, source_lang, target_lang)
@@ -899,6 +948,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Location", f"/documents/{sha256}")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def _prepare_fast_translation_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response(
+                {"error": "Invalid action token. Refresh the page and try again."},
+                status=HTTPStatus.FORBIDDEN,
+            )
+            return
+        source_lang = data.get("source_lang", "").strip().casefold()
+        if source_lang not in {"en", "uk"}:
+            self._action_response(
+                {"error": "Fast Translation supports English/Ukrainian → Russian"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if not fast_translation_available():
+            self._action_response(
+                {"error": "Fast Translation dependencies are missing. Run UPDATE_OSINT.cmd."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            action = self.server.actions.start_prepare_translation(source_lang)
+        except (ActionBusyError, ValueError) as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self._action_response({"action": action}, status=HTTPStatus.ACCEPTED)
 
     def _set_performance_action(self) -> None:
         data = self._form_data()
