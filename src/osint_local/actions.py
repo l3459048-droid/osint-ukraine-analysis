@@ -97,9 +97,18 @@ class ActionManager:
                 "scan": "Scan complete",
                 "index": "Index complete",
                 "translate": "Translation complete",
-                "maintenance": "Background check complete",
             }
-            self._state.message = labels.get(self._state.kind, "Action complete")
+            if self._state.kind == "maintenance":
+                counts = result.get("counts") or {}
+                changed = (
+                    int(counts.get("processed", 0))
+                    + int(counts.get("duplicate", 0))
+                    + int(result.get("embedded_chunks") or 0)
+                    + (1 if result.get("translated") else 0)
+                )
+                self._state.message = "Library updated" if changed else "Library up to date"
+            else:
+                self._state.message = labels.get(self._state.kind, "Action complete")
             self._state.result = result
             self._state.finished_at = _now()
             if self._state.total and self._state.current < self._state.total:
