@@ -165,6 +165,7 @@ def _system_panel(status: dict, csrf_token: str) -> str:
     ollama_models = status.get("ollama_models") or []
     pairs = queue.get("pairs") or []
     fast_pairs = set(queue.get("fast_pairs") or [])
+    fast_available = bool(queue.get("fast_available"))
     benchmarks = queue.get("fast_benchmarks") or {}
     action = status.get("action") or {}
     action_message = action.get("error") or action.get("message") or "Ready"
@@ -189,14 +190,17 @@ def _system_panel(status: dict, csrf_token: str) -> str:
             detail = "INT8 model ready. Benchmark will appear after setup/benchmark."
         else:
             detail = "One-time download + INT8 conversion required."
-        button = (
-            '<span class="ready-mark">Ready</span>'
-            if ready
-            else f'<form class="fast-setup-form" action="/actions/prepare-fast-translation" method="post" data-fast-setup>'
-                 f'<input type="hidden" name="csrf" value="{_e(csrf_token)}">'
-                 f'<input type="hidden" name="source_lang" value="{lang}">'
-                 '<button type="submit">Prepare</button></form>'
-        )
+        if ready:
+            button = '<span class="ready-mark">Ready</span>'
+        elif fast_available:
+            button = (
+                f'<form class="fast-setup-form" action="/actions/prepare-fast-translation" method="post" data-fast-setup>'
+                f'<input type="hidden" name="csrf" value="{_e(csrf_token)}">'
+                f'<input type="hidden" name="source_lang" value="{lang}">'
+                '<button type="submit">Prepare</button></form>'
+            )
+        else:
+            button = '<span class="panel-subtle">Run updater</span>'
         return (
             '<div class="fast-pair"><div><strong>' + _e(label) + ' → Russian</strong>'
             '<small>' + _e(detail) + '</small></div>' + button + '</div>'
@@ -243,7 +247,7 @@ def _translation_panel(csrf_token: str, sha256: str, translations, *, available:
             continue
         rows.append(
             f'<a class="translation-item" href="/translation/{_e(sha256)}/{_e(row["source_lang"])}/ru" target="_blank">'
-            f'<span>{_e(row["source_lang"])} → ru</span><small>{_e((row["created_at"] or "")[:19])}</small></a>'
+            f'<span>{_e(row["source_lang"])} → ru</span><small>{_e((row["created_at"] or "")[:19])} · {_e(row["engine"] or "unknown")}</small></a>'
         )
     saved = "".join(rows) if rows else '<span class="translation-empty">No Russian translation saved yet.</span>'
     availability = "Offline engine ready" if available else "Install optional offline translation support"
