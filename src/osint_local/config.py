@@ -83,6 +83,10 @@ DEFAULT_CONFIG = {
         "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         "batch_size": 12,
         "auto_embed": False,
+        "hybrid_candidate_multiplier": 3,
+        "hybrid_rrf_k": 60,
+        "hybrid_semantic_weight": 1.0,
+        "hybrid_lexical_weight": 1.0,
     },
     "translation": {
         "enabled": True,
