@@ -88,6 +88,7 @@ def search_chunks(
     limit: int = 10,
     mode: str = "auto",
     encoder: Encoder | None = None,
+    filters: dict | None = None,
 ) -> list[SearchHit]:
     query = query.strip()
     if not query:
@@ -108,16 +109,16 @@ def search_chunks(
             candidate_multiplier = max(2, min(8, int(config.get("hybrid_candidate_multiplier", 3))))
             candidate_limit = max(limit * candidate_multiplier, min(30, total_chunks))
             semantic_hits = _semantic_search(
-                db, query, model, candidate_limit, encoder=encoder
+                db, query, model, candidate_limit, encoder=encoder, filters=filters
             )
-            lexical_hits = _lexical_search(db, query, candidate_limit)
+            lexical_hits = _lexical_search(db, query, candidate_limit, filters=filters)
             return _hybrid_rerank(query, semantic_hits, lexical_hits, limit, config)
         except RuntimeError:
             if mode == "hybrid":
                 raise
 
     if mode == "semantic" and semantic_enabled and semantic_ready:
-        return _semantic_search(db, query, model, limit, encoder=encoder)
+        return _semantic_search(db, query, model, limit, encoder=encoder, filters=filters)
 
     if mode in {"semantic", "hybrid"}:
         if not semantic_enabled:
@@ -128,7 +129,7 @@ def search_chunks(
             detail = f"Semantic index is incomplete ({embedded}/{total_chunks} chunks embedded)."
         raise RuntimeError(detail + " Run: osint-local index")
 
-    return _lexical_search(db, query, limit)
+    return _lexical_search(db, query, limit, filters=filters)
 
 
 def _semantic_search(
@@ -138,23 +139,30 @@ def _semantic_search(
     limit: int,
     *,
     encoder: Encoder | None = None,
+    filters: dict | None = None,
 ) -> list[SearchHit]:
     encoder = encoder or SentenceTransformerEncoder(model)
     query_vector = _normalize_vector(encoder.encode([query])[0])
     scored: list[SearchHit] = []
-    for row in db.iter_embeddings(model):
+    for row in db.iter_embeddings(model, filters=filters):
         vector = _blob_to_vector(row["vector"])
         score = _dot(query_vector, vector)
         scored.append(_hit(row, score, "semantic"))
     return sorted(scored, key=lambda hit: hit.score, reverse=True)[:limit]
 
 
-def _lexical_search(db: Database, query: str, limit: int) -> list[SearchHit]:
+def _lexical_search(
+    db: Database,
+    query: str,
+    limit: int,
+    *,
+    filters: dict | None = None,
+) -> list[SearchHit]:
     terms = _terms(query)
     if not terms:
         return []
     hits: list[SearchHit] = []
-    for row in db.iter_chunks():
+    for row in db.iter_chunks(filters=filters):
         lowered = row["text"].casefold()
         matched = 0
         frequency = 0
