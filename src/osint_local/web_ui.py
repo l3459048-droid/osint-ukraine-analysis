@@ -168,13 +168,15 @@ def _system_panel(status: dict, csrf_token: str) -> str:
     fast_available = bool(queue.get("fast_available"))
     benchmarks = queue.get("fast_benchmarks") or {}
     action = status.get("action") or {}
+    fast_setup = status.get("fast_setup") or {}
     action_message = action.get("error") or action.get("message") or "Ready"
+    fast_message = fast_setup.get("error") or fast_setup.get("message") or ""
     semantic = "Ready" if status.get("semantic_available") else "Not installed"
     ollama = "Ready" if status.get("ollama_reachable") else "Unavailable"
     tesseract = status.get("tesseract") or "Not found"
     model_text = ", ".join(ollama_models) if ollama_models else "No local models detected"
     pair_text = ", ".join(pairs) if pairs else "No EN/UK → RU pair installed"
-    background_state = "Paused for Chat/Ask" if status.get("interactive_busy") else (
+    background_state = "Paused for interactive work" if status.get("interactive_busy") else (
         "On" if status.get("background_enabled") else "Off"
     )
 
@@ -226,7 +228,7 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 </section>
 <section class="panel fast-translation-panel">
 <div class="panel-head"><div><h2>Fast Translation</h2><span class="panel-subtle">CTranslate2 INT8 · batched CPU translation</span></div></div>
-<div class="fast-status" data-fast-status>{_e(action_message if action.get("kind") == "translation-setup" else "")}</div>
+<div class="fast-status" data-fast-status>{_e(fast_message if fast_setup.get("status") in {"running", "failed"} else "")}</div>
 {fast_pair("en", "English")}
 {fast_pair("uk", "Ukrainian")}
 <div class="ask-filter-note">After a pair is prepared, automatic translation prefers Fast Translation. Argos remains a fallback. Chat and Ask pause translation at safe batch boundaries.</div>
@@ -638,7 +640,7 @@ UI_SCRIPT = r"""
         const response = await fetch('/api/activity', {cache: 'no-store'});
         if (response.ok) {
           const data = await response.json();
-          const state = data.action || {};
+          const state = data.fast_setup || {};
           const relevant = state.kind === 'translation-setup';
           fastSetupRunning = relevant && state.status === 'running';
           fastSetupForms.forEach(form => {
@@ -675,7 +677,8 @@ UI_SCRIPT = r"""
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Fast Translation setup failed');
         fastSetupRunning = true;
-        if (fastStatus) fastStatus.textContent = (data.action && data.action.message) || 'Starting…';
+        const state = data.fast_setup || data.action || {};
+        if (fastStatus) fastStatus.textContent = state.message || 'Starting…';
       } catch (error) {
         if (button) button.disabled = false;
         if (fastStatus) {
