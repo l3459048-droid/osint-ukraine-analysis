@@ -1670,3 +1670,27 @@ def test_prepare_fast_model_repairs_missing_tokenizer_assets_without_reconversio
     assert (model_dir / "target.spm").read_bytes() == b"target-tokenizer"
     assert [filename for _, filename in downloads] == ["source.spm", "target.spm"]
     assert fast.fast_model_ready(settings, "uk", "ru") is True
+
+
+def test_sentencepiece_loader_uses_bytes_for_unicode_windows_paths(tmp_path: Path):
+    import osint_local.fast_translation as fast
+
+    tokenizer_dir = tmp_path / "проекты" / "модели"
+    tokenizer_dir.mkdir(parents=True)
+    tokenizer_path = tokenizer_dir / "source.spm"
+    tokenizer_path.write_bytes(b"serialized-sentencepiece-model")
+
+    seen = {}
+
+    class FakeProcessor:
+        def LoadFromSerializedProto(self, payload):
+            seen["payload"] = payload
+            return True
+
+    class FakeSpm:
+        SentencePieceProcessor = FakeProcessor
+
+    processor = fast._load_sentencepiece_processor(FakeSpm, tokenizer_path)
+
+    assert isinstance(processor, FakeProcessor)
+    assert seen["payload"] == b"serialized-sentencepiece-model"
