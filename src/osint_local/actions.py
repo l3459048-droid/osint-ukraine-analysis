@@ -8,7 +8,6 @@ from typing import Any, Callable
 
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
-from .fast_translation import prepare_fast_model
 from .translation import next_passive_translation, translate_document
 
 
@@ -65,14 +64,6 @@ class ActionManager:
     def start_maintenance(self) -> dict[str, Any]:
         return self._start("maintenance", self._run_maintenance)
 
-    def start_prepare_translation(self, source_lang: str) -> dict[str, Any]:
-        if source_lang not in {"en", "uk"}:
-            raise ValueError("Fast Translation supports en→ru and uk→ru")
-        return self._start(
-            "translation-setup",
-            lambda: self._run_prepare_translation(source_lang),
-        )
-
     def _start(self, kind: str, target: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
             if self._state.status == "running":
@@ -108,7 +99,6 @@ class ActionManager:
                 "scan": "Scan complete",
                 "index": "Index complete",
                 "translate": "Translation complete",
-                "translation-setup": "Fast Translation ready",
             }
             if self._state.kind == "maintenance" and result.get("paused"):
                 self._state.message = "Background paused for Chat/Ask"
@@ -172,15 +162,6 @@ class ActionManager:
             target_lang=target_lang,
             progress=progress,
             should_pause=self.interactive_busy,
-        )
-
-    def _run_prepare_translation(self, source_lang: str) -> dict[str, Any]:
-        return prepare_fast_model(
-            self.pipeline.settings,
-            source_lang,
-            "ru",
-            progress=lambda current, total, message: self._progress(current, total, message),
-            run_benchmark=True,
         )
 
     def _run_maintenance(self) -> dict[str, Any]:
