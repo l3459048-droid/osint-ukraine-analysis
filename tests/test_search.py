@@ -132,3 +132,60 @@ def test_auto_search_falls_back_to_lexical_when_index_is_incomplete(tmp_path: Pa
         assert hits[0].source_path == "two.txt"
     finally:
         pipeline.close()
+
+
+def test_hybrid_search_fuses_semantic_and_lexical_rankings(tmp_path: Path):
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "both.txt").write_text(
+        "FPV drone logistics adaptation and supply routes.", encoding="utf-8"
+    )
+    (settings.input_dir / "semantic.txt").write_text(
+        "Unmanned aircraft tactics in forward operations.", encoding="utf-8"
+    )
+    (settings.input_dir / "lexical.txt").write_text(
+        "FPV logistics note with unrelated filler.", encoding="utf-8"
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.scan()
+        build_embeddings(pipeline.db, settings.search, encoder=FakeEncoder())
+        hits = search_chunks(
+            pipeline.db,
+            "FPV logistics",
+            settings.search,
+            mode="hybrid",
+            encoder=FakeEncoder(),
+            limit=3,
+        )
+        assert hits
+        assert hits[0].backend == "hybrid"
+        assert hits[0].source_path == "both.txt"
+        assert 0.0 < hits[0].score <= 1.0
+    finally:
+        pipeline.close()
+
+
+def test_auto_uses_hybrid_when_semantic_index_is_current(tmp_path: Path):
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "auto.txt").write_text(
+        "FPV drone logistics adaptation.", encoding="utf-8"
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.scan()
+        build_embeddings(pipeline.db, settings.search, encoder=FakeEncoder())
+        hits = search_chunks(
+            pipeline.db,
+            "FPV logistics",
+            settings.search,
+            mode="auto",
+            encoder=FakeEncoder(),
+        )
+        assert hits
+        assert hits[0].backend == "hybrid"
+    finally:
+        pipeline.close()
