@@ -10,6 +10,7 @@ import shutil
 import threading
 import webbrowser
 from dataclasses import asdict
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .actions import ActionBusyError, ActionManager
 from .background import BackgroundLoop
+from .chat import chat_local
 from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
 from .pipeline import LocalPipeline
@@ -29,6 +31,8 @@ from .web_ui import (
     _activity_details,
     _ask_form,
     _category_list,
+    _chat_messages,
+    _chat_panel,
     _chunk_card,
     _classification_badges,
     _document_cards,
@@ -77,7 +81,7 @@ class AskManager:
         with self._lock:
             return dict(self._state)
 
-    def start(self, question: str, analysis_mode: str = "quick") -> dict:
+    def start(self, question: str, analysis_mode: str = "quick", filters: dict | None = None) -> dict:
         question = question.strip()
         analysis_mode = str(analysis_mode or "quick").strip().casefold()
         if not question:
@@ -95,11 +99,12 @@ class AskManager:
                 "error": "",
                 "model": "",
                 "mode": analysis_mode,
+                "filters": dict(filters or {}),
             }
             initial = dict(self._state)
             threading.Thread(
                 target=self._worker,
-                args=(question, analysis_mode),
+                args=(question, analysis_mode, dict(filters or {})),
                 name="osint-local-ask",
                 daemon=True,
             ).start()
@@ -116,7 +121,7 @@ class AskManager:
             if self._state.get("status") == "running":
                 self._state["message"] = messages.get(stage, stage)
 
-    def _worker(self, question: str, analysis_mode: str) -> None:
+    def _worker(self, question: str, analysis_mode: str, filters: dict) -> None:
         try:
             result = ask_documents(
                 self.pipeline.db,
@@ -124,6 +129,7 @@ class AskManager:
                 self.pipeline.settings.search,
                 self.pipeline.settings.qa,
                 analysis_mode=analysis_mode,
+                filters=filters,
                 progress=self._progress,
             )
         except RuntimeError as exc:
@@ -135,6 +141,7 @@ class AskManager:
                     self.pipeline.settings.search,
                     limit=int(self.pipeline.settings.qa.get("top_k", 8)),
                     mode="auto",
+                    filters=filters,
                 )
             except RuntimeError:
                 fallback = []
@@ -168,6 +175,98 @@ class AskManager:
             )
 
 
+
+
+class ChatManager:
+    """Run general local Ollama chat without document retrieval."""
+
+    def __init__(self, pipeline: LocalPipeline) -> None:
+        self.pipeline = pipeline
+        self._lock = threading.RLock()
+        self._history: list[dict[str, str]] = []
+        self._state = {
+            "status": "idle",
+            "message": "Ready",
+            "html": "",
+            "error": "",
+            "model": "",
+        }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            state = dict(self._state)
+            state["history"] = [dict(item) for item in self._history]
+            if not state.get("html"):
+                state["html"] = _chat_messages(self._history, state.get("model") or "")
+            return state
+
+    def start(self, message: str) -> dict:
+        message = message.strip()
+        if not message:
+            raise ValueError("Message is empty")
+        with self._lock:
+            if self._state.get("status") == "running":
+                raise ActionBusyError("Chat is already generating a response")
+            history = [dict(item) for item in self._history]
+            self._state = {
+                "status": "running",
+                "message": "Ollama формирует ответ…",
+                "html": _chat_messages(self._history, self._state.get("model") or ""),
+                "error": "",
+                "model": self._state.get("model") or "",
+            }
+            initial = dict(self._state)
+            threading.Thread(
+                target=self._worker,
+                args=(message, history),
+                name="osint-local-chat",
+                daemon=True,
+            ).start()
+            return initial
+
+    def clear(self) -> dict:
+        with self._lock:
+            if self._state.get("status") == "running":
+                raise ActionBusyError("Wait for the current chat response to finish")
+            self._history = []
+            self._state = {
+                "status": "idle",
+                "message": "Ready",
+                "html": "",
+                "error": "",
+                "model": self._state.get("model") or "",
+            }
+            return self.snapshot()
+
+    def _worker(self, message: str, history: list[dict[str, str]]) -> None:
+        try:
+            result = chat_local(message, history, self.pipeline.settings.qa)
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, RuntimeError) else f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                self._state.update(
+                    status="failed",
+                    message="Не удалось получить ответ",
+                    error=error,
+                    html=_chat_messages(self._history, self._state.get("model") or "", error=error),
+                )
+            return
+
+        with self._lock:
+            self._history.extend([
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": result.answer},
+            ])
+            self._history = self._history[-24:]
+            self._state.update(
+                status="succeeded",
+                message="Готово",
+                error="",
+                model=result.model,
+                html=_chat_messages(self._history, result.model),
+            )
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -177,6 +276,7 @@ class DashboardServer(ThreadingHTTPServer):
         self.settings = pipeline.settings
         self.actions = ActionManager(pipeline)
         self.ask = AskManager(pipeline)
+        self.chat = ChatManager(pipeline)
         self.csrf_token = secrets.token_urlsafe(32)
         self.folder_opener = folder_opener
         self.folder_picker = folder_picker
