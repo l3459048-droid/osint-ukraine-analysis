@@ -102,7 +102,7 @@
     "passive_enabled": true,
     "max_per_cycle": 1,
     "fast_compute_type": "int8",
-    "fast_batch_tokens": 2048,
+    "fast_batch_tokens": 0,
     "fast_text_batch": 16,
     "fast_max_input_tokens": 220,
     "fast_inter_threads": 0,
