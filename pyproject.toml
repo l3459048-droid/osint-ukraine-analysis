@@ -21,6 +21,7 @@ fasttranslate = [
   "ctranslate2>=4.6,<5",
   "sentencepiece>=0.2,<1",
   "transformers>=4.44,<5",
+  "torch>=2.2,<3",
 ]
 all = [
   "Pillow>=10,<13",
@@ -30,6 +31,7 @@ all = [
   "ctranslate2>=4.6,<5",
   "sentencepiece>=0.2,<1",
   "transformers>=4.44,<5",
+  "torch>=2.2,<3",
 ]
 dev = ["pytest>=8,<10"]
 
