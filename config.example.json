@@ -115,7 +115,8 @@
     "max_context_chars": 6500,
     "num_ctx": 4096,
     "think": false,
-    "keep_alive": 0
+    "keep_alive": 0,
+    "chat_history_chars": 6000
   },
   "web": {
     "host": "127.0.0.1",
