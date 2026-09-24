@@ -164,6 +164,8 @@ def _system_panel(status: dict, csrf_token: str) -> str:
     queue = status.get("translation_queue") or {}
     ollama_models = status.get("ollama_models") or []
     pairs = queue.get("pairs") or []
+    fast_pairs = set(queue.get("fast_pairs") or [])
+    benchmarks = queue.get("fast_benchmarks") or {}
     action = status.get("action") or {}
     action_message = action.get("error") or action.get("message") or "Ready"
     semantic = "Ready" if status.get("semantic_available") else "Not installed"
@@ -171,6 +173,35 @@ def _system_panel(status: dict, csrf_token: str) -> str:
     tesseract = status.get("tesseract") or "Not found"
     model_text = ", ".join(ollama_models) if ollama_models else "No local models detected"
     pair_text = ", ".join(pairs) if pairs else "No EN/UK → RU pair installed"
+    background_state = "Paused for Chat/Ask" if status.get("interactive_busy") else (
+        "On" if status.get("background_enabled") else "Off"
+    )
+
+    def fast_pair(lang: str, label: str) -> str:
+        pair = f"{lang}->ru"
+        ready = pair in fast_pairs
+        benchmark = benchmarks.get(lang) or {}
+        if ready and benchmark:
+            ppm = benchmark.get("estimated_pages_per_minute")
+            hundred = benchmark.get("estimated_100_pages_minutes")
+            detail = f"Benchmark: ~{ppm} pages/min · 100 pages ~{hundred} min"
+        elif ready:
+            detail = "INT8 model ready. Benchmark will appear after setup/benchmark."
+        else:
+            detail = "One-time download + INT8 conversion required."
+        button = (
+            '<span class="ready-mark">Ready</span>'
+            if ready
+            else f'<form class="fast-setup-form" action="/actions/prepare-fast-translation" method="post" data-fast-setup>'
+                 f'<input type="hidden" name="csrf" value="{_e(csrf_token)}">'
+                 f'<input type="hidden" name="source_lang" value="{lang}">'
+                 '<button type="submit">Prepare</button></form>'
+        )
+        return (
+            '<div class="fast-pair"><div><strong>' + _e(label) + ' → Russian</strong>'
+            '<small>' + _e(detail) + '</small></div>' + button + '</div>'
+        )
+
     return f"""<section class="stats-grid">
 {_stat_card("Documents", status.get("documents", 0))}
 {_stat_card("Index queue", status.get("index_pending", 0))}
@@ -186,8 +217,15 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 <div><span>Translation</span><strong>{queue.get("translated", 0)} translated · {queue.get("pending", 0)} pending</strong><small>{_e(pair_text)}{f' · {queue.get("blocked", 0)} blocked' if queue.get("blocked") else ""}</small></div>
 <div><span>Ollama</span><strong>{_e(ollama)}</strong><small>{_e(model_text)}</small></div>
 <div><span>OCR / Tesseract</span><strong>{_e("Ready" if status.get("tesseract") else "Not found")}</strong><small>{_e(tesseract)}</small></div>
-<div><span>Automatic cycle</span><strong>{"On" if status.get("background_enabled") else "Off"}</strong><small>Every {int(status.get("background_interval", 0))}s</small></div>
+<div><span>Automatic cycle</span><strong>{_e(background_state)}</strong><small>Every {int(status.get("background_interval", 0))}s</small></div>
 </div>
+</section>
+<section class="panel fast-translation-panel">
+<div class="panel-head"><div><h2>Fast Translation</h2><span class="panel-subtle">CTranslate2 INT8 · batched CPU translation</span></div></div>
+<div class="fast-status" data-fast-status>{_e(action_message if action.get("kind") == "translation-setup" else "")}</div>
+{fast_pair("en", "English")}
+{fast_pair("uk", "Ukrainian")}
+<div class="ask-filter-note">After a pair is prepared, automatic translation prefers Fast Translation. Argos remains a fallback. Chat and Ask pause translation at safe batch boundaries.</div>
 </section>"""
 
 def _translation_panel(csrf_token: str, sha256: str, translations, *, available: bool, pairs: set[tuple[str, str]], action: dict) -> str:
@@ -534,7 +572,7 @@ CSS = r"""
 .setup-panel{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,1.2fr);gap:18px;align-items:center;background:linear-gradient(180deg,#121a20,var(--panel));border:1px solid #2c5365;border-radius:14px;padding:18px;margin:0 0 18px}.setup-panel h2{margin:5px 0 4px;font-size:20px}.setup-panel p,.settings-row p{margin:4px 0 0;color:var(--muted);font-size:13px}.setup-actions{display:flex;flex-direction:column;gap:8px;align-items:stretch}.setup-actions form,.settings-actions form{margin:0}.setup-actions button,.settings-panel button,.ghost-action{font:inherit;border-radius:9px;padding:10px 13px;cursor:pointer}.setup-actions button,.settings-panel button{background:var(--accent);color:#041014;border:0;font-weight:800}.setup-actions .secondary,.settings-panel .secondary{background:var(--panel2);color:var(--text);border:1px solid var(--line)}.path-form,.settings-path{display:grid;grid-template-columns:minmax(160px,1fr) auto;gap:8px}.path-form input,.settings-path input{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px 11px;font:inherit;min-width:0}.ghost-action{background:transparent;color:var(--muted);border:1px solid transparent}.ghost-action:hover{color:var(--text)}.path-note{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(620px,65vw)}.settings-panel{padding:0}.settings-row{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:17px 18px;border-top:1px solid var(--line)}.settings-row:first-child{border-top:0}.settings-row strong{display:block;overflow-wrap:anywhere}.setting-label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.settings-actions{display:flex;gap:8px;flex-shrink:0}.settings-path{padding:0 18px 17px}.action-buttons .ghost-action{padding:12px 10px}.action-buttons form:not([data-action-form]){margin:0}.panel-subtle{display:block;color:var(--muted);font-size:12px;margin-top:3px}.translation-form{display:flex;align-items:end;gap:8px;flex-wrap:wrap}.translation-form label{color:var(--muted);font-size:11px;display:flex;flex-direction:column;gap:4px}.translation-form select{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;min-width:120px}.translation-form button,.tiny-button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font:inherit;cursor:pointer}.translation-form button{background:var(--accent);color:#041014;border-color:transparent;font-weight:800}.translation-form button:disabled{opacity:.45}.translation-arrow{color:var(--muted);padding-bottom:9px}.translation-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.translation-item{border:1px solid var(--line);border-radius:9px;padding:7px 9px;text-decoration:none;color:var(--text);display:flex;gap:8px;align-items:center}.translation-item small,.translation-empty,.translation-status{color:var(--muted);font-size:12px}.translation-status{min-height:18px;margin-top:8px}@media(max-width:760px){.setup-panel{grid-template-columns:1fr}.settings-row{align-items:flex-start;flex-direction:column}.settings-actions{width:100%;flex-wrap:wrap}.path-form,.settings-path{grid-template-columns:1fr}.path-note{max-width:85vw}}
 .ask-form{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:stretch;margin:0 0 8px}.ask-form textarea{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:13px;font:inherit;resize:vertical;min-height:78px}.ask-side{display:flex;flex-direction:column;gap:8px;min-width:190px}.ask-side select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:inherit}.ask-form button{background:var(--accent);color:#041014;border:0;border-radius:10px;padding:0 22px;min-height:42px;font:inherit;font-weight:800;cursor:pointer}.ask-hint{color:var(--muted);font-size:12px;margin:0 0 14px}.answer-text{white-space:pre-wrap;line-height:1.65}.qa-sources{display:flex;flex-direction:column}.qa-source{display:flex;gap:10px;padding:10px 0;border-top:1px solid var(--line);text-decoration:none;color:var(--text)}.qa-source:first-child{border-top:0}.qa-source b{color:var(--accent)}.reader-panel{scroll-margin-top:80px}.reader-nav{display:flex;gap:12px;flex-wrap:wrap}.reader-grid{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line)}.reader-grid>div{min-width:0;padding:14px}.reader-grid>div+div{border-left:1px solid var(--line)}.reader-grid pre{white-space:pre-wrap;word-break:break-word;line-height:1.55;margin:8px 0 0;max-height:65vh;overflow:auto}.reader-label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.reader-empty{color:var(--muted);padding:18px 0;line-height:1.5}.fixed-target{display:block;background:#0d1116;border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:120px;color:var(--text)}@media(max-width:800px){.reader-grid{grid-template-columns:1fr}.reader-grid>div+div{border-left:0;border-top:1px solid var(--line)}.ask-form{grid-template-columns:1fr}.ask-side{min-width:0}.ask-form button{padding:12px}}
 
-.ask-filters{grid-column:1/-1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:0 12px}.ask-filters summary{cursor:pointer;color:var(--muted);padding:10px 2px}.ask-filters summary span{font-size:12px;margin-left:6px}.ask-filter-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:4px 0 12px}.ask-filter-grid label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:12px}.ask-filter-grid input,.ask-filter-grid select{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit}.ask-documents{grid-column:1/-1}.ask-documents select{min-height:120px}.ask-filter-note{color:var(--muted);font-size:12px;margin:0 0 12px}.chat-form{display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:12px}.chat-form textarea{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:13px;font:inherit;resize:vertical;min-height:78px}.chat-form button{background:var(--accent);color:#041014;border:0;border-radius:10px;padding:0 22px;font:inherit;font-weight:800;cursor:pointer}.chat-actions{display:flex}.chat-clear-form{margin:8px 0 10px}.chat-clear-form button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 12px;cursor:pointer}.chat-history{display:flex;flex-direction:column;gap:10px}.chat-message{max-width:88%;border:1px solid var(--line);border-radius:12px;padding:11px 13px}.chat-message.user{align-self:flex-end;background:#10202a}.chat-message.assistant{align-self:flex-start;background:var(--panel2)}.chat-message>span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.chat-message>div{white-space:pre-wrap;overflow-wrap:anywhere}.chat-status{color:var(--muted);font-size:13px;margin:8px 0}.chat-status.action-error{color:var(--danger)}@media(max-width:800px){.ask-filter-grid{grid-template-columns:1fr 1fr}.chat-form{grid-template-columns:1fr}.chat-form button{padding:12px}}@media(max-width:520px){.ask-filter-grid{grid-template-columns:1fr}}
+.fast-pair{display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--line);padding:13px 2px}.fast-pair:first-of-type{border-top:0}.fast-pair strong,.fast-pair small{display:block}.fast-pair small{color:var(--muted);margin-top:3px}.fast-pair form{margin:0}.fast-pair button{background:var(--accent);color:#041014;border:0;border-radius:9px;padding:9px 13px;font:inherit;font-weight:800;cursor:pointer}.ready-mark{color:var(--accent2);font-weight:800}.fast-status{color:var(--muted);font-size:13px;min-height:20px}.fast-status.action-error{color:var(--danger)}.ask-filters{grid-column:1/-1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:0 12px}.ask-filters summary{cursor:pointer;color:var(--muted);padding:10px 2px}.ask-filters summary span{font-size:12px;margin-left:6px}.ask-filter-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:4px 0 12px}.ask-filter-grid label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:12px}.ask-filter-grid input,.ask-filter-grid select{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit}.ask-documents{grid-column:1/-1}.ask-documents select{min-height:120px}.ask-filter-note{color:var(--muted);font-size:12px;margin:0 0 12px}.chat-form{display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:12px}.chat-form textarea{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:13px;font:inherit;resize:vertical;min-height:78px}.chat-form button{background:var(--accent);color:#041014;border:0;border-radius:10px;padding:0 22px;font:inherit;font-weight:800;cursor:pointer}.chat-actions{display:flex}.chat-clear-form{margin:8px 0 10px}.chat-clear-form button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 12px;cursor:pointer}.chat-history{display:flex;flex-direction:column;gap:10px}.chat-message{max-width:88%;border:1px solid var(--line);border-radius:12px;padding:11px 13px}.chat-message.user{align-self:flex-end;background:#10202a}.chat-message.assistant{align-self:flex-start;background:var(--panel2)}.chat-message>span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.chat-message>div{white-space:pre-wrap;overflow-wrap:anywhere}.chat-status{color:var(--muted);font-size:13px;margin:8px 0}.chat-status.action-error{color:var(--danger)}@media(max-width:800px){.ask-filter-grid{grid-template-columns:1fr 1fr}.chat-form{grid-template-columns:1fr}.chat-form button{padding:12px}}@media(max-width:520px){.ask-filter-grid{grid-template-columns:1fr}}
 """
 
 
@@ -584,6 +622,65 @@ UI_SCRIPT = r"""
       }
     });
     pollTranslation();
+  }
+
+  const fastSetupForms = [...document.querySelectorAll('[data-fast-setup]')];
+  if (fastSetupForms.length) {
+    const fastStatus = document.querySelector('[data-fast-status]');
+    let fastSetupRunning = false;
+
+    async function pollFastSetup() {
+      try {
+        const response = await fetch('/api/activity', {cache: 'no-store'});
+        if (response.ok) {
+          const data = await response.json();
+          const state = data.action || {};
+          const relevant = state.kind === 'translation-setup';
+          fastSetupRunning = relevant && state.status === 'running';
+          fastSetupForms.forEach(form => {
+            const button = form.querySelector('button');
+            if (button) button.disabled = fastSetupRunning;
+          });
+          if (relevant && fastStatus) {
+            fastStatus.textContent = state.error || state.message || '';
+            fastStatus.classList.toggle('action-error', state.status === 'failed');
+          }
+          if (relevant && state.status === 'succeeded') {
+            setTimeout(() => location.reload(), 500);
+            return;
+          }
+        }
+      } catch (_) {}
+      setTimeout(pollFastSetup, fastSetupRunning ? 700 : 3000);
+    }
+
+    fastSetupForms.forEach(form => form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button');
+      if (button) button.disabled = true;
+      if (fastStatus) {
+        fastStatus.classList.remove('action-error');
+        fastStatus.textContent = 'Preparing Fast Translation model…';
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: 'POST',
+          body: new URLSearchParams(new FormData(form)),
+          headers: {'X-Requested-With': 'fetch'},
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Fast Translation setup failed');
+        fastSetupRunning = true;
+        if (fastStatus) fastStatus.textContent = (data.action && data.action.message) || 'Starting…';
+      } catch (error) {
+        if (button) button.disabled = false;
+        if (fastStatus) {
+          fastStatus.classList.add('action-error');
+          fastStatus.textContent = error.message || 'Fast Translation setup failed';
+        }
+      }
+    }));
+    pollFastSetup();
   }
 
   const askForm = document.querySelector('[data-ask-form]');
