@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import load_settings, write_default_config
 from .pipeline import LocalPipeline
-from .search import SearchIndex
+from .search import build_embeddings, search_chunks
 
 
 def configure_logging(log_dir: Path | None = None, verbose: bool = False) -> None:
@@ -35,18 +35,23 @@ def main() -> int:
     scan = sub.add_parser("scan", help="Process all supported files in the input directory")
     scan.add_argument("--force", action="store_true")
     sub.add_parser("watch", help="Continuously watch the input directory")
-    sub.add_parser("status", help="Show processing and search-index statistics")
-    sub.add_parser("doctor", help="Check OCR and semantic-search dependencies")
+    sub.add_parser("status", help="Show processing and index statistics")
+    sub.add_parser("doctor", help="Check local runtime, OCR and semantic-search dependencies")
 
-    index = sub.add_parser("index", help="Build/update local chunks and semantic embeddings")
-    index.add_argument("--force", action="store_true")
-    index.add_argument("--chunks-only", action="store_true")
+    index = sub.add_parser("index", help="Build local semantic embeddings for indexed chunks")
+    index.add_argument("--force", action="store_true", help="Rebuild embeddings even if they exist")
 
-    search = sub.add_parser("search", help="Search document chunks")
+    search = sub.add_parser("search", help="Search indexed document chunks")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
     search.add_argument("--mode", choices=["auto", "semantic", "lexical"], default="auto")
     search.add_argument("--json", action="store_true", dest="as_json")
+
+    serve_cmd = sub.add_parser("serve", help="Run the local Web UI")
+    serve_cmd.add_argument("--host", default=None, help="Bind address (default from config)")
+    serve_cmd.add_argument("--port", type=int, default=None, help="Port (default from config)")
+    serve_cmd.add_argument("--no-open", action="store_true", help="Do not open a browser automatically")
+    serve_cmd.add_argument("--allow-network", action="store_true", help="Allow binding beyond localhost")
 
     args = parser.parse_args()
     config_path = Path(args.config).expanduser().resolve()
@@ -63,34 +68,6 @@ def main() -> int:
 
     settings = load_settings(config_path)
     configure_logging(settings.logs_dir, args.verbose)
-
-    if args.command == "index":
-        with SearchIndex(settings) as search_index:
-            chunk_stats = search_index.sync_chunks(force=args.force)
-            embedded = 0
-            if not args.chunks_only:
-                try:
-                    embedded = search_index.build_embeddings(force=args.force)
-                except RuntimeError as exc:
-                    print(str(exc))
-                    print(json.dumps(chunk_stats, ensure_ascii=False, indent=2))
-                    return 2
-            print(json.dumps({**chunk_stats, "embedded_chunks": embedded}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "search":
-        with SearchIndex(settings) as search_index:
-            try:
-                hits = search_index.search(args.query, limit=args.limit, mode=args.mode)
-            except RuntimeError as exc:
-                print(str(exc))
-                return 2
-            if args.as_json:
-                print(json.dumps([asdict(hit) for hit in hits], ensure_ascii=False, indent=2))
-            else:
-                _print_hits(hits)
-        return 0
-
     pipeline = LocalPipeline(settings)
     try:
         if args.command == "scan":
@@ -109,25 +86,61 @@ def main() -> int:
             return 0
 
         if args.command == "status":
-            with SearchIndex(settings) as search_index:
-                status = {
-                    "ingestion": pipeline.db.stats(),
-                    "search": search_index.stats(),
-                }
-            print(json.dumps(status, ensure_ascii=False, indent=2))
+            print(json.dumps(pipeline.db.stats(), ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "index":
+            try:
+                count = build_embeddings(pipeline.db, settings.search, force=args.force)
+            except RuntimeError as exc:
+                print(str(exc))
+                return 2
+            print(json.dumps({"embedded_chunks": count, "model": settings.search.get("model")}, indent=2))
+            return 0
+
+        if args.command == "search":
+            try:
+                hits = search_chunks(
+                    pipeline.db,
+                    args.query,
+                    settings.search,
+                    limit=args.limit,
+                    mode=args.mode,
+                )
+            except RuntimeError as exc:
+                print(str(exc))
+                return 2
+            if args.as_json:
+                print(json.dumps([asdict(hit) for hit in hits], ensure_ascii=False, indent=2))
+            else:
+                _print_hits(hits)
+            return 0
+
+        if args.command == "serve":
+            from .web import serve
+
+            host = args.host or str(settings.web.get("host", "127.0.0.1"))
+            port = args.port if args.port is not None else int(settings.web.get("port", 8080))
+            if host not in {"127.0.0.1", "localhost", "::1"} and not args.allow_network:
+                print("Refusing non-local bind without --allow-network. Use --host 127.0.0.1 for local-only access.")
+                return 2
+            open_browser = bool(settings.web.get("open_browser", True)) and not args.no_open
+            serve(pipeline, host=host, port=port, open_browser=open_browser)
             return 0
 
         if args.command == "doctor":
-            with SearchIndex(settings) as search_index:
-                search_stats = search_index.stats()
+            model = str(settings.search.get("model"))
             info = {
                 "input_dir_exists": settings.input_dir.exists(),
                 "workspace_writable": _writable(settings.workspace_dir),
                 "tesseract": shutil.which("tesseract"),
                 "ocr_enabled": bool(settings.ocr.get("enabled", True)),
                 "sentence_transformers_installed": importlib.util.find_spec("sentence_transformers") is not None,
-                "semantic_model": settings.search.get("model"),
-                "search_index": search_stats,
+                "semantic_model": model,
+                "semantic_embeddings": pipeline.db.embedding_count(model),
+                "indexed_chunks": pipeline.db.chunk_count(),
+                "web_host": str(settings.web.get("host", "127.0.0.1")),
+                "web_port": int(settings.web.get("port", 8080)),
             }
             print(json.dumps(info, ensure_ascii=False, indent=2))
             return 0 if info["workspace_writable"] else 1
@@ -145,7 +158,8 @@ def _print_hits(hits) -> None:
         if hit.page is not None:
             location += f" — page {hit.page}"
         print(f"[{index}] {hit.score:.4f} {hit.backend} | {location}")
-        print(" ".join(hit.text.split())[:900])
+        snippet = " ".join(hit.text.split())
+        print(snippet[:900])
         print()
 
 

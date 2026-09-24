@@ -1,19 +1,33 @@
-# OSINT Local — v0.2
+# OSINT Local — v0.3
 
-Local-first document ingestion and search for `osint-ukraine-analysis`.
+Local-first document ingestion, search and Web UI for the OSINT Ukraine Analysis fork.
 
-## What v0.2 adds
+## Current pipeline
 
-v0.1 already ingests local PDF/DOCX/TXT/Markdown files, extracts text, optionally runs local OCR, fingerprints documents with SHA-256, classifies them and stores state in SQLite.
+- recursively reads a configurable local folder;
+- accepts PDF, DOCX, TXT and Markdown;
+- fingerprints content with SHA-256 and skips unchanged/duplicate files;
+- extracts embedded PDF/DOCX/TXT text;
+- optionally OCRs sparse/scanned PDF pages with local Tesseract;
+- classifies documents with configurable multilingual keywords;
+- creates page-aware overlapping chunks;
+- stores documents, classes, chunks and embeddings in SQLite;
+- supports lexical search without ML dependencies;
+- optionally builds multilingual semantic embeddings with Sentence Transformers;
+- serves a dependency-free local Web UI with Python's standard library;
+- exposes read-only local JSON endpoints for stats and search;
+- never modifies or deletes the source document.
 
-v0.2 adds a search layer **on top of the existing v0.1 artifacts**:
+## Layout
 
-- page-aware chunks for PDFs;
-- lightweight lexical search with no ML dependency;
-- optional multilingual semantic embeddings with Sentence Transformers;
-- search results containing source path, PDF page and matching fragment;
-- a separate search index inside the same `workspace/osint.db`;
-- automatic reuse of documents already processed by v0.1 — no re-extraction required.
+```text
+inbox/                        <- source documents (or any external folder)
+workspace/
+  osint.db                    <- documents, chunks, classes, embeddings
+  text/<sha256>.txt           <- extracted text
+  metadata/<sha256>.json
+  logs/osint-local.log
+```
 
 ## Install
 
@@ -21,133 +35,76 @@ Python 3.10+:
 
 ```bash
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 pip install -e .
 ```
 
-For OCR:
+Optional OCR:
 
 ```bash
 pip install -e '.[ocr]'
 ```
 
-For semantic search:
+Optional semantic search:
 
 ```bash
 pip install -e '.[search]'
 ```
 
-Or both:
+Everything:
 
 ```bash
 pip install -e '.[all]'
 ```
 
-The current `sentence-transformers` 6.x line supports Python 3.10+, and the default model is `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`. The model supports multilingual sentence similarity. On its first use Sentence Transformers may download model files; after they are cached, inference runs locally. `search.model` can also be a local model directory for fully offline operation.
-
-## First run
+## Start
 
 ```bash
 osint-local init
-```
-
-Point `config.json` at any local directories:
-
-```json
-{
-  "input_dir": "D:/OSINT/Documents",
-  "workspace_dir": "D:/OSINT/AnalysisData"
-}
-```
-
-Process documents:
-
-```bash
+# edit config.json if needed
+osint-local doctor
 osint-local scan
+osint-local serve
 ```
 
-## Search without ML
-
-Lexical search works without Sentence Transformers. The first search automatically creates/updates chunks from already extracted `text/<sha256>.txt` files:
-
-```bash
-osint-local search "FPV logistics" --mode lexical
-```
-
-For PDFs, v0.2 recognizes the `--- PAGE N ---` markers written by the v0.1 extractor, so results retain page numbers without reprocessing the source PDF.
-
-## Semantic search
-
-Install the search extra, then build embeddings:
-
-```bash
-pip install -e '.[search]'
-osint-local index
-```
-
-Search automatically switches to semantic mode only when **all current chunks** have embeddings. This prevents newly ingested but not-yet-embedded documents from silently disappearing from results.
-
-```bash
-osint-local search "изменение тактики применения FPV"
-osint-local search "electronic warfare against drones" --limit 5
-```
-
-Force a mode:
-
-```bash
-osint-local search "air defense" --mode lexical
-osint-local search "air defense" --mode semantic
-```
-
-JSON output:
-
-```bash
-osint-local search "FPV" --json
-```
-
-Example:
+Default address:
 
 ```text
-[1] 0.8124 semantic | reports/fpv-study.pdf — page 14
-Operators increasingly use relay platforms to extend FPV range ...
+http://127.0.0.1:8080
 ```
 
-## Updating the index
+On Windows, after installation, `start_local.bat` starts the Web UI using `.venv` when present. Linux/macOS can use `./start_local.sh`.
 
-After new documents are ingested, run:
+## Web UI
+
+The v0.3 UI includes:
+
+- dashboard statistics;
+- category counts and category filtering;
+- processed document list;
+- lexical or semantic search;
+- search hits with source document + page + chunk context;
+- document detail page with metadata, classifications and extracted chunks;
+- inline access to original local source files;
+- HTTP Range support so browser PDF viewers can seek within local PDFs.
+
+The server binds to loopback by default. CLI refuses a non-local bind unless `--allow-network` is supplied explicitly.
+
+## Semantic indexing
 
 ```bash
 osint-local index
+osint-local search "изменения тактики применения FPV"
 ```
 
-`index` first synchronizes chunks, then embeds only chunks that do not yet have an embedding. Existing vectors are reused.
+`auto` search uses semantic ranking only when the configured model has embeddings for all current chunks. A partial/stale index falls back to lexical search until `osint-local index` completes.
 
-To rebuild everything:
+## API
 
-```bash
-osint-local index --force
+```text
+GET /api/stats
+GET /api/search?q=electronic+warfare&mode=auto&limit=10
 ```
 
-To build chunks only, without loading an ML model:
-
-```bash
-osint-local index --chunks-only
-```
-
-## Continuous ingestion
-
-```bash
-osint-local watch
-```
-
-The watcher remains lightweight and does not load the semantic model. New documents are extracted normally; the next `search` refreshes the text chunks automatically, and the next `index` adds their embeddings.
-
-## Diagnostics
-
-```bash
-osint-local status
-osint-local doctor
-```
-
-The source folder is treated as read-only. Generated text, metadata, chunks and embeddings live in the workspace.
+The current API is read-only and intended as a stable bridge for later UI/automation layers.

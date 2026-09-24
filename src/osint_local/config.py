@@ -47,6 +47,12 @@ DEFAULT_CONFIG = {
         "semantic_enabled": True,
         "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         "batch_size": 32,
+        "auto_embed": False,
+    },
+    "web": {
+        "host": "127.0.0.1",
+        "port": 8080,
+        "open_browser": True,
     },
 }
 
@@ -60,6 +66,7 @@ class Settings:
     ocr: dict[str, Any]
     classification: dict[str, Any]
     search: dict[str, Any]
+    web: dict[str, Any]
 
     @property
     def db_path(self) -> Path:
@@ -94,6 +101,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         ocr=data["ocr"],
         classification=data["classification"],
         search=data["search"],
+        web=data["web"],
     )
 
 

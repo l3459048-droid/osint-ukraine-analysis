@@ -25,6 +25,12 @@
     "min_chunk_chars": 80,
     "semantic_enabled": true,
     "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    "batch_size": 32
+    "batch_size": 32,
+    "auto_embed": false
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "open_browser": true
   }
 }
