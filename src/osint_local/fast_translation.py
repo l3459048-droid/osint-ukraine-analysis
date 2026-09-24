@@ -15,6 +15,9 @@ FAST_MODELS = {
     ("uk", "ru"): "Helsinki-NLP/opus-mt-uk-ru",
 }
 
+FAST_CORE_FILES = ("model.bin", "config.json")
+FAST_TOKENIZER_FILES = ("source.spm", "target.spm")
+
 
 @dataclass(frozen=True)
 class FastTranslationStats:
@@ -46,12 +49,65 @@ def fast_model_dir(settings, source_lang: str, target_lang: str = "ru") -> Path:
     )
 
 
+def _usable_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _fast_model_core_ready(path: Path) -> bool:
+    return all(_usable_file(path / name) for name in FAST_CORE_FILES)
+
+
 def fast_model_ready(settings, source_lang: str, target_lang: str = "ru") -> bool:
     path = fast_model_dir(settings, source_lang, target_lang)
-    return all(
-        (path / name).is_file()
-        for name in ("model.bin", "config.json", "source.spm", "target.spm")
+    return _fast_model_core_ready(path) and all(
+        _usable_file(path / name) for name in FAST_TOKENIZER_FILES
     )
+
+
+def _download_model_asset(model_id: str, filename: str) -> Path:
+    from huggingface_hub import hf_hub_download
+
+    return Path(hf_hub_download(repo_id=model_id, filename=filename))
+
+
+def _ensure_tokenizer_assets(
+    model_id: str,
+    output_dir: Path,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    missing = [name for name in FAST_TOKENIZER_FILES if not _usable_file(output_dir / name)]
+    total = len(missing)
+
+    for index, filename in enumerate(missing, 1):
+        if progress:
+            progress(index - 1, total, f"Restoring tokenizer asset {filename}…")
+        cached = _download_model_asset(model_id, filename)
+        if not _usable_file(cached):
+            raise RuntimeError(f"Downloaded tokenizer asset is missing or empty: {filename}")
+        destination = output_dir / filename
+        temp = destination.with_suffix(destination.suffix + ".tmp")
+        try:
+            shutil.copyfile(cached, temp)
+            temp.replace(destination)
+        finally:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+
+    still_missing = [
+        name for name in FAST_TOKENIZER_FILES
+        if not _usable_file(output_dir / name)
+    ]
+    if still_missing:
+        raise RuntimeError(
+            "Fast tokenizer assets are incomplete: " + ", ".join(still_missing)
+        )
 
 
 def fast_ready_pairs(settings) -> set[tuple[str, str]]:
@@ -94,29 +150,49 @@ def prepare_fast_model(
         return info
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
-    temp_dir = output_dir.with_name(output_dir.name + ".tmp")
-    shutil.rmtree(temp_dir, ignore_errors=True)
-    if progress:
-        progress(0, 0, f"Downloading and converting {source_lang}→{target_lang} Fast model…")
 
-    try:
-        import ctranslate2
-
-        converter = ctranslate2.converters.TransformersConverter(
-            model_id,
-            copy_files=["source.spm", "target.spm"],
-        )
-        converter.convert(
-            str(temp_dir),
-            quantization="int8",
-            force=True,
-        )
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-        temp_dir.replace(output_dir)
-    except Exception as exc:
+    # A previous setup may already contain the expensive converted weights but
+    # miss tokenizer assets. Repair that directory in-place instead of
+    # converting the model again.
+    if _fast_model_core_ready(output_dir):
+        try:
+            if progress:
+                progress(0, 0, f"Repairing {source_lang}→{target_lang} tokenizer files…")
+            _ensure_tokenizer_assets(model_id, output_dir, progress=progress)
+        except Exception as exc:
+            raise RuntimeError(f"Fast model tokenizer repair failed: {exc}") from exc
+    else:
+        temp_dir = output_dir.with_name(output_dir.name + ".tmp")
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise RuntimeError(f"Fast model setup failed: {exc}") from exc
+        if progress:
+            progress(0, 0, f"Downloading and converting {source_lang}→{target_lang} Fast model…")
+
+        try:
+            import ctranslate2
+
+            converter = ctranslate2.converters.TransformersConverter(
+                model_id,
+                copy_files=list(FAST_TOKENIZER_FILES),
+            )
+            converter.convert(
+                str(temp_dir),
+                quantization="int8",
+                force=True,
+            )
+            # Do not rely solely on converter copy_files: explicitly ensure the
+            # tokenizer assets exist before promoting the temporary model.
+            _ensure_tokenizer_assets(model_id, temp_dir, progress=progress)
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            temp_dir.replace(output_dir)
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise RuntimeError(f"Fast model setup failed: {exc}") from exc
+
+    if not fast_model_ready(settings, source_lang, target_lang):
+        raise RuntimeError(
+            f"Fast model {source_lang}→{target_lang} is incomplete after setup"
+        )
 
     result = {
         "ready": True,
