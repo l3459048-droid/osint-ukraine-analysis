@@ -348,6 +348,21 @@ class Database:
             )
             self.conn.commit()
 
+    def translation_document_count(self, *, target_lang: str = "ru") -> int:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(DISTINCT document_sha256) AS n FROM translations WHERE target_lang=?",
+                (target_lang,),
+            ).fetchone()
+        return int(row["n"])
+
+    def error_count(self) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM documents WHERE status='error'"
+            ).fetchone()
+        return int(row["n"])
+
     def list_translations(self, sha256: str) -> list[sqlite3.Row]:
         with self._lock:
             return self.conn.execute(
@@ -377,4 +392,6 @@ class Database:
             "statuses": statuses,
             "chunks": chunk_count,
             "embeddings": {row["model"]: row["n"] for row in embedding_rows},
+            "translations_ru": self.translation_document_count(target_lang="ru"),
+            "errors": self.error_count(),
         }
