@@ -355,7 +355,7 @@ def test_embedding_progress_callback(tmp_path: Path):
         pipeline.close()
 
 
-def test_web_ui_scan_action_csrf_and_activity(tmp_path: Path):
+def test_web_ui_process_now_action_csrf_and_activity(tmp_path: Path):
     import re
     import time
     import urllib.error
@@ -379,14 +379,14 @@ def test_web_ui_scan_action_csrf_and_activity(tmp_path: Path):
 
         with urllib.request.urlopen(base + "/", timeout=5) as response:
             body = response.read().decode("utf-8")
-        assert "Build index" in body
+        assert "Process now" in body
         assert "Activity" in body
         match = re.search(r'name="csrf" value="([^"]+)"', body)
         assert match
         csrf = match.group(1)
 
         bad = urllib.request.Request(
-            base + "/actions/scan",
+            base + "/actions/maintenance",
             data=urllib.parse.urlencode({"csrf": "bad"}).encode(),
             headers={"X-Requested-With": "fetch"},
             method="POST",
@@ -398,7 +398,7 @@ def test_web_ui_scan_action_csrf_and_activity(tmp_path: Path):
             assert exc.code == 403
 
         request = urllib.request.Request(
-            base + "/actions/scan",
+            base + "/actions/maintenance",
             data=urllib.parse.urlencode({"csrf": csrf}).encode(),
             headers={"X-Requested-With": "fetch"},
             method="POST",
@@ -406,7 +406,7 @@ def test_web_ui_scan_action_csrf_and_activity(tmp_path: Path):
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
             assert response.status == 202
-            assert payload["action"]["kind"] == "scan"
+            assert payload["action"]["kind"] == "maintenance"
 
         deadline = time.time() + 5
         activity = {"action": {"status": "running"}}
@@ -420,7 +420,7 @@ def test_web_ui_scan_action_csrf_and_activity(tmp_path: Path):
         with urllib.request.urlopen(base + "/", timeout=5) as response:
             body = response.read().decode("utf-8")
             assert "from-ui.txt" in body
-            assert "Scan complete" in body
+            assert "Library updated" in body
     finally:
         if server is not None:
             server.shutdown()
@@ -608,6 +608,8 @@ def test_translation_saves_separate_page_aware_markdown(tmp_path: Path):
         assert "ПЕРЕВОД:" in output.read_text(encoding="utf-8")
         rows = pipeline.db.list_translations(processed.sha256)
         assert rows[0]["target_lang"] == "ru"
+        assert pipeline.db.translation_document_count(target_lang="ru") == 1
+        assert pipeline.db.stats()["translations_ru"] == 1
         assert progress[-1][0] == progress[-1][1]
     finally:
         pipeline.close()
@@ -777,9 +779,11 @@ def test_failed_document_is_retried_on_next_scan(tmp_path: Path):
             extension=".txt",
         )
         pipeline.db.mark_error(sha256, "synthetic failure")
+        assert pipeline.db.error_count() == 1
         assert pipeline.db.find_current_source("retry.txt", stat.st_size, stat.st_mtime_ns) is None
         result = pipeline.process_file(source)
         assert result.status == "processed"
+        assert pipeline.db.error_count() == 0
     finally:
         pipeline.close()
 
