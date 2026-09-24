@@ -51,7 +51,7 @@ PERFORMANCE_PROFILES = {
         "translation": {"max_per_cycle": 2},
         "background": {"interval_seconds": 60},
         "qa": {
-            "top_k": 5,
+            "top_k": 6,
             "max_context_chars": 9000,
             "num_ctx": 4096,
             "think": False,
@@ -104,7 +104,7 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "base_url": "http://127.0.0.1:11434",
         "model": "qwen3:1.7b",
-        "top_k": 6,
+        "top_k": 5,
         "max_context_chars": 6500,
         "num_ctx": 4096,
         "think": False,
