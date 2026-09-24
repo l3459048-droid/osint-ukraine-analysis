@@ -1,6 +1,6 @@
-# OSINT Local — v0.4
+# OSINT Local — v0.3
 
-Local-first document ingestion, search and a minimal action-oriented Web UI for the OSINT Ukraine Analysis fork.
+Local-first document ingestion, search and Web UI for the OSINT Ukraine Analysis fork.
 
 ## Current pipeline
 
@@ -15,10 +15,19 @@ Local-first document ingestion, search and a minimal action-oriented Web UI for 
 - supports lexical search without ML dependencies;
 - optionally builds multilingual semantic embeddings with Sentence Transformers;
 - serves a dependency-free local Web UI with Python's standard library;
-- runs Scan and Build index as serialized background UI actions with progress;
-- shows recent processing errors in a collapsed Activity section;
-- exposes local read-only JSON endpoints for stats/search/activity;
+- exposes read-only local JSON endpoints for stats and search;
 - never modifies or deletes the source document.
+
+## Layout
+
+```text
+inbox/                        <- source documents (or any external folder)
+workspace/
+  osint.db                    <- documents, chunks, classes, embeddings
+  text/<sha256>.txt           <- extracted text
+  metadata/<sha256>.json
+  logs/osint-local.log
+```
 
 ## Install
 
@@ -28,16 +37,34 @@ Python 3.10+:
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 # Linux/macOS: source .venv/bin/activate
-pip install -e '.[all]'
+pip install -e .
 ```
 
-For a lightweight lexical-only installation, `pip install -e .` is enough. OCR and semantic search remain optional extras (`.[ocr]`, `.[search]`).
+Optional OCR:
+
+```bash
+pip install -e '.[ocr]'
+```
+
+Optional semantic search:
+
+```bash
+pip install -e '.[search]'
+```
+
+Everything:
+
+```bash
+pip install -e '.[all]'
+```
 
 ## Start
 
 ```bash
 osint-local init
-# edit config.json once if needed
+# edit config.json if needed
+osint-local doctor
+osint-local scan
 osint-local serve
 ```
 
@@ -47,42 +74,37 @@ Default address:
 http://127.0.0.1:8080
 ```
 
-On Windows, `start_local.bat` starts the Web UI using `.venv` when present. Linux/macOS can use `./start_local.sh`.
+On Windows, after installation, `start_local.bat` starts the Web UI using `.venv` when present. Linux/macOS can use `./start_local.sh`.
 
-## v0.4 UI workflow
+## Web UI
 
-The primary dashboard deliberately exposes only three library actions:
+The v0.3 UI includes:
 
-1. **Scan** — process new or changed supported files.
-2. **Build index** — add missing semantic embeddings when the optional search dependency is installed.
-3. **Refresh** — reload the current state.
-
-Scan/index run on a background worker and the dashboard polls `/api/activity` for progress. Only one long-running action is allowed at a time. When an action completes, the dashboard refreshes its statistics automatically.
-
-Secondary information is collapsed under **Activity**, including the last action result and recent processing errors.
-
-## Web safety
+- dashboard statistics;
+- category counts and category filtering;
+- processed document list;
+- lexical or semantic search;
+- search hits with source document + page + chunk context;
+- document detail page with metadata, classifications and extracted chunks;
+- inline access to original local source files;
+- HTTP Range support so browser PDF viewers can seek within local PDFs.
 
 The server binds to loopback by default. CLI refuses a non-local bind unless `--allow-network` is supplied explicitly.
 
-State-changing Web UI endpoints use POST plus a random server-session CSRF token. The search/stats/activity API remains read-only.
-
 ## Semantic indexing
-
-The UI button calls the same indexer as:
 
 ```bash
 osint-local index
+osint-local search "изменения тактики применения FPV"
 ```
 
-`auto` search uses semantic ranking only when the configured model has embeddings for all current chunks. A partial/stale index falls back to lexical search until indexing completes.
+`auto` search uses semantic ranking only when the configured model has embeddings for all current chunks. A partial/stale index falls back to lexical search until `osint-local index` completes.
 
 ## API
 
 ```text
 GET /api/stats
 GET /api/search?q=electronic+warfare&mode=auto&limit=10
-GET /api/activity
 ```
 
-The API is intended as a stable local bridge for later desktop packaging and automation.
+The current API is read-only and intended as a stable bridge for later UI/automation layers.
