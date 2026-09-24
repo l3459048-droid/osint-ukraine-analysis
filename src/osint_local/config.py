@@ -40,6 +40,14 @@ DEFAULT_CONFIG = {
         "dpi": 220,
     },
     "classification": {"min_score": 1, "domains": DEFAULT_DOMAINS},
+    "search": {
+        "chunk_chars": 1200,
+        "overlap_chars": 180,
+        "min_chunk_chars": 80,
+        "semantic_enabled": True,
+        "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "batch_size": 32,
+    },
 }
 
 
@@ -51,6 +59,7 @@ class Settings:
     allowed_extensions: frozenset[str]
     ocr: dict[str, Any]
     classification: dict[str, Any]
+    search: dict[str, Any]
 
     @property
     def db_path(self) -> Path:
@@ -84,6 +93,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         allowed_extensions=frozenset(_normalize_ext(x) for x in data["allowed_extensions"]),
         ocr=data["ocr"],
         classification=data["classification"],
+        search=data["search"],
     )
 
 

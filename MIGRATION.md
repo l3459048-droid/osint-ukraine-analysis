@@ -1,28 +1,22 @@
-# Migration from Xolthol/osint-ukraine-analysis
+# Migration to local-first v0.2
 
-Recommended first migration:
+v0.2 is backward-compatible with the local v0.1 workspace.
 
-1. Add `src/osint_local`, `pyproject.toml`, the config template and tests.
-2. Stop using `setup_gdrive.py` and `sync_gdrive.py` as the main runtime.
-3. Move old Google-specific files under `legacy/google_drive/` instead of deleting them immediately.
-4. Point `input_dir` at any folder on the PC; source documents do not have to live inside the Git repository.
-5. Keep `workspace/` and the source folder out of Git.
+The search index is built from the existing SQLite document registry and `workspace/text/<sha256>.txt` artifacts. Existing PDFs do **not** need to be OCRed or extracted again.
 
-Suggested shape:
+Recommended upgrade:
 
-```text
-osint-ukraine-analysis/
-  src/osint_local/
-  tests/
-  config.example.json
-  pyproject.toml
-  inbox/            # optional, gitignored
-  workspace/        # generated, gitignored
-  legacy/
-    google_drive/
-      setup_gdrive.py
-      sync_gdrive.py
-      GUIDE_GOOGLE_DRIVE.md
+```bash
+pip install -e '.[all]'
+osint-local search "test" --mode lexical
+osint-local index
+osint-local status
 ```
 
-Next layers should consume the SQLite state and extracted text rather than reading arbitrary folders directly: language detection -> semantic embeddings -> claim/entity extraction -> cited synthesis -> local web UI.
+The first search/index creates three additional tables in the existing SQLite database:
+
+- `search_documents`
+- `search_chunks`
+- `search_embeddings`
+
+Old Google Drive scripts remain legacy code and are not required by the local runtime.

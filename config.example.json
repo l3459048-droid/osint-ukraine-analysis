@@ -18,5 +18,13 @@
       "Logistics": ["logistics", "supply", "transport", "maintenance", "логист", "снабж", "постач", "ремонт"],
       "Combat Medicine": ["medic", "medevac", "casualty", "first aid", "эвакуац", "медик", "евакуац"]
     }
+  },
+  "search": {
+    "chunk_chars": 1200,
+    "overlap_chars": 180,
+    "min_chunk_chars": 80,
+    "semantic_enabled": true,
+    "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "batch_size": 32
   }
 }
