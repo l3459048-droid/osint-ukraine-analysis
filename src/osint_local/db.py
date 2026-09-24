@@ -136,7 +136,7 @@ class Database:
     def list_documents(
         self, *, limit: int = 50, offset: int = 0, domain: str | None = None
     ) -> list[sqlite3.Row]:
-        limit = max(1, min(500, int(limit)))
+        limit = max(1, min(5000, int(limit)))
         offset = max(0, int(offset))
         with self._lock:
             if domain:
