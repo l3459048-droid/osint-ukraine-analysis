@@ -175,6 +175,7 @@ class DashboardServer(ThreadingHTTPServer):
             self.background = BackgroundLoop(
                 self.actions,
                 interval_seconds=int(self.settings.background.get("interval_seconds", 120)),
+                initial_delay=int(self.settings.background.get("initial_delay_seconds", 3)),
             )
             self.background.start()
 
@@ -228,7 +229,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         try:
-            if path == "/actions/scan":
+            if path == "/actions/maintenance":
+                self._start_action("maintenance")
+            elif path == "/actions/scan":
                 self._start_action("scan")
             elif path == "/actions/index":
                 self._start_action("index")
@@ -295,12 +298,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 embedding_count=stats["embedding_count"],
                 chunk_count=stats["chunks"],
                 input_dir=self.settings.input_dir,
+                background_enabled=bool(self.settings.background.get("enabled", True)),
+                background_interval=int(self.settings.background.get("interval_seconds", 60)),
             ),
             '<section class="stats-grid">',
             _stat_card("Documents", stats["documents"]),
-            _stat_card("Chunks", stats["chunks"]),
-            _stat_card("Semantic", "Ready" if semantic_ready else f'{stats["embedding_count"]}/{stats["chunks"]}'),
-            _stat_card("Categories", len(stats["categories"])),
+            _stat_card("Semantic index", "Ready" if semantic_ready else f'{stats["embedding_count"]}/{stats["chunks"]}'),
+            _stat_card("Russian translations", stats["translations_ru"]),
+            _stat_card("Errors", stats["errors"]),
             "</section>",
             _search_form("", "auto", 10),
             '<div class="two-col">',
@@ -476,6 +481,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "chunks": raw["chunks"],
             "embedding_count": raw["embeddings"].get(model, 0),
             "embedding_model": model,
+            "translations_ru": int(raw.get("translations_ru", 0)),
+            "errors": int(raw.get("errors", 0)),
             "categories": self.db.category_counts(),
         }
 
@@ -495,7 +502,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            if kind == "scan":
+            if kind == "maintenance":
+                action = self.server.actions.start_maintenance()
+            elif kind == "scan":
                 action = self.server.actions.start_scan()
             elif kind == "index":
                 if importlib.util.find_spec("sentence_transformers") is None:
@@ -642,6 +651,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         settings.input_dir.mkdir(parents=True, exist_ok=True)
         self.server.pipeline.settings = settings
         self.server.settings = settings
+        if bool(settings.background.get("enabled", True)):
+            try:
+                if self.server.actions.snapshot().get("status") != "running":
+                    self.server.actions.start_maintenance()
+            except ActionBusyError:
+                pass
 
     def _form_data(self) -> dict[str, str]:
         try:
