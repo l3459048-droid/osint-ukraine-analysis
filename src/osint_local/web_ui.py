@@ -491,6 +491,7 @@ def _metadata_grid(metadata: dict, doc) -> str:
         ("Size", _human_bytes(doc["source_size"])),
         ("Processed", doc["processed_at"] or "—"),
         ("Extraction", doc["extraction_method"] or "—"),
+        ("Language", doc["language"] or metadata.get("language") or "—"),
         ("Pages", len(metadata.get("pages") or [])),
     ]
     return '<div class="meta-grid">' + "".join(
