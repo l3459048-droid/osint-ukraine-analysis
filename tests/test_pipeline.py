@@ -869,3 +869,146 @@ def test_web_ask_runs_in_background_and_preserves_result(tmp_path: Path, monkeyp
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+def test_v08_performance_profiles_migrate_and_apply(tmp_path: Path):
+    from osint_local.config import performance_profile_patch, update_config
+
+    config = make_config(tmp_path)
+    settings = load_settings(config)
+    assert settings.performance["profile"] == "economy"
+    assert settings.search["batch_size"] == 12
+    assert settings.background["interval_seconds"] == 90
+    assert settings.translation["max_per_cycle"] == 1
+    assert settings.qa["top_k"] == 5
+    assert settings.qa["keep_alive"] == 0
+
+    update_config(config, performance_profile_patch("balanced"))
+    settings = load_settings(config)
+    assert settings.performance["profile"] == "balanced"
+    assert settings.search["batch_size"] == 32
+    assert settings.background["interval_seconds"] == 60
+    assert settings.translation["max_per_cycle"] == 2
+    assert settings.qa["top_k"] == 6
+    assert settings.qa["keep_alive"] == "5m"
+
+
+def test_v08_translation_queue_reports_ready_and_translated(tmp_path: Path):
+    from osint_local.translation import translation_queue_status, translate_document
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "english.txt").write_text(
+        "English FPV drone logistics report.", encoding="utf-8"
+    )
+    (settings.input_dir / "ukrainian.txt").write_text(
+        "Український звіт про дрони і логістику.", encoding="utf-8"
+    )
+    (settings.input_dir / "russian.txt").write_text(
+        "Русский отчет о беспилотниках и логистике.", encoding="utf-8"
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.scan()
+        english = next(
+            row for row in pipeline.db.list_documents(limit=20)
+            if row["source_path"] == "english.txt"
+        )
+        translate_document(
+            settings,
+            pipeline.db,
+            english["sha256"],
+            source_lang="en",
+            target_lang="ru",
+            translator=lambda text, src, dst: "РУ " + text,
+        )
+        queue = translation_queue_status(
+            settings,
+            pipeline.db,
+            available_pairs={("en", "ru"), ("uk", "ru")},
+        )
+        assert queue["eligible"] == 2
+        assert queue["translated"] == 1
+        assert queue["ready"] == 1
+        assert queue["pending"] == 1
+        assert queue["blocked"] == 0
+        assert queue["russian"] == 1
+    finally:
+        pipeline.close()
+
+
+def test_v08_web_can_switch_profile_and_render_system_status(tmp_path: Path, monkeypatch):
+    import re
+    import urllib.parse
+    import urllib.request
+    import osint_local.web as web
+
+    config = make_config(tmp_path)
+    settings = load_settings(config)
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "status.txt").write_text(
+        "English FPV status document.", encoding="utf-8"
+    )
+    pipeline = LocalPipeline(settings)
+    pipeline.scan()
+    server = None
+    thread = None
+    try:
+        monkeypatch.setattr(web, "ollama_models", lambda *args, **kwargs: ["qwen3:1.7b"])
+        monkeypatch.setattr(web, "argos_available", lambda: False)
+        monkeypatch.setattr(
+            web,
+            "translation_queue_status",
+            lambda *args, **kwargs: {
+                "scanned": 1,
+                "eligible": 1,
+                "translated": 0,
+                "pending": 1,
+                "ready": 0,
+                "blocked": 1,
+                "russian": 0,
+                "unknown": 0,
+                "pairs": [],
+            },
+        )
+
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/settings", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "Performance profile" in body
+        match = re.search(r'name="csrf" value="([^"]+)"', body)
+        assert match
+
+        request = urllib.request.Request(
+            base + "/settings/performance",
+            data=urllib.parse.urlencode(
+                {"csrf": match.group(1), "profile": "balanced"}
+            ).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert payload["profile"] == "balanced"
+        assert server.settings.performance["profile"] == "balanced"
+        assert server.settings.translation["max_per_cycle"] == 2
+
+        with urllib.request.urlopen(base + "/system", timeout=5) as response:
+            system_body = response.read().decode("utf-8")
+        assert "Translation queue" in system_body
+        assert "Index queue" in system_body
+        assert "Balanced" in system_body
+        assert "qwen3:1.7b" in system_body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
