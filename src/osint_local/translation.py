@@ -266,7 +266,7 @@ def next_passive_translation(settings, db, *, progress=None, translator=None, av
     if translator is None and not argos_available():
         return None
     pairs = set(available_pairs) if available_pairs is not None else installed_pairs()
-    for doc in db.list_documents(limit=500):
+    for doc in db.list_documents(limit=5000):
         sha256 = doc["sha256"]
         text_path = settings.text_dir / f"{sha256}.txt"
         if not text_path.is_file():
