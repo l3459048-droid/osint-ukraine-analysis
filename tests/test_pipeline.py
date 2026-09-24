@@ -1323,3 +1323,198 @@ def test_web_ask_filters_are_passed_to_retrieval(tmp_path: Path, monkeypatch):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+def test_fast_translation_resumes_from_saved_section_checkpoint(tmp_path: Path, monkeypatch):
+    import osint_local.fast_translation as fast
+
+    settings = load_settings(make_config(tmp_path))
+    calls = []
+    fail_once = {"value": True}
+
+    class FakeFastTranslator:
+        model_id = "fake/opus"
+        compute_type = "int8"
+        inter_threads = 1
+        intra_threads = 2
+
+        def __init__(self, settings, source_lang, target_lang="ru"):
+            self.model_id = "fake/opus"
+            self.compute_type = "int8"
+            self.inter_threads = 1
+            self.intra_threads = 2
+
+        def translate_texts(self, texts):
+            calls.append(list(texts))
+            if fail_once["value"] and len(calls) == 2:
+                raise RuntimeError("synthetic interruption")
+            return ["RU " + value for value in texts]
+
+    monkeypatch.setattr(fast, "FastTranslator", FakeFastTranslator)
+    sections = [(1, "page one"), (2, "page two"), (3, "page three")]
+    try:
+        fast.translate_sections_fast(
+            settings,
+            "a" * 64,
+            sections,
+            "en",
+            "ru",
+        )
+        assert False, "first run should be interrupted"
+    except RuntimeError as exc:
+        assert "synthetic interruption" in str(exc)
+
+    assert len(calls) == 2
+    fail_once["value"] = False
+    translated, stats = fast.translate_sections_fast(
+        settings,
+        "a" * 64,
+        sections,
+        "en",
+        "ru",
+    )
+    assert [page for page, _ in translated] == [1, 2, 3]
+    assert translated[0][1] == "RU page one"
+    assert stats.pages_translated == 2
+    assert len(calls) == 4
+
+
+def test_translation_waits_while_interactive_work_is_active():
+    import threading
+    import time
+
+    from osint_local.translation import _translate_sections_legacy
+
+    gate = threading.Event()
+    gate.set()
+    translated_calls = []
+
+    def translator(text, src, dst):
+        translated_calls.append(text)
+        return "RU " + text
+
+    result = {}
+
+    def run():
+        result["value"] = _translate_sections_legacy(
+            [(1, "first page")],
+            "en",
+            "ru",
+            translator,
+            1800,
+            should_pause=gate.is_set,
+        )
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    time.sleep(0.1)
+    assert translated_calls == []
+    gate.clear()
+    thread.join(timeout=2)
+    assert translated_calls == ["first page"]
+    assert result["value"][0][1] == "RU first page"
+
+
+def test_chat_marks_interactive_gate_until_generation_finishes(tmp_path: Path, monkeypatch):
+    import threading
+    import time
+
+    import osint_local.web as web
+    from osint_local.chat import ChatResult
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_chat(message, history, qa_config):
+        entered.set()
+        release.wait(2)
+        return ChatResult("done", "fake-local")
+
+    try:
+        monkeypatch.setattr(web, "chat_local", fake_chat)
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        server.chat.start("hello")
+        assert entered.wait(1)
+        assert server.interactive.active() is True
+        release.set()
+
+        deadline = time.time() + 2
+        while server.chat.snapshot()["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+        assert server.chat.snapshot()["status"] == "succeeded"
+        assert server.interactive.active() is False
+    finally:
+        release.set()
+        if server is not None:
+            server.server_close()
+        pipeline.close()
+
+
+def test_web_can_start_fast_translation_model_setup(tmp_path: Path, monkeypatch):
+    import re
+    import time
+    import urllib.parse
+    import urllib.request
+
+    import osint_local.actions as actions
+    import osint_local.web as web
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+
+    def fake_prepare(settings, source_lang, target_lang="ru", *, progress=None, run_benchmark=True):
+        if progress:
+            progress(0, 0, "Preparing fake model…")
+        return {
+            "ready": True,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "model": "fake/opus",
+            "benchmark": {"estimated_pages_per_minute": 25.0},
+        }
+
+    try:
+        monkeypatch.setattr(web, "fast_translation_available", lambda: True)
+        monkeypatch.setattr(actions, "prepare_fast_model", fake_prepare)
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/system", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+        req = urllib.request.Request(
+            base + "/actions/prepare-fast-translation",
+            data=urllib.parse.urlencode({"csrf": csrf, "source_lang": "en"}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 202
+        assert payload["action"]["kind"] == "translation-setup"
+
+        deadline = time.time() + 2
+        state = server.actions.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = server.actions.snapshot()
+        assert state["status"] == "succeeded"
+        assert state["result"]["source_lang"] == "en"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
