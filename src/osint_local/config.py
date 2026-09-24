@@ -29,10 +29,45 @@ DEFAULT_DOMAINS = {
     ],
 }
 
+PERFORMANCE_PROFILES = {
+    "economy": {
+        "label": "Economy",
+        "description": "Lowest background and Q&A memory pressure.",
+        "search": {"batch_size": 12},
+        "translation": {"max_per_cycle": 1},
+        "background": {"interval_seconds": 90},
+        "qa": {
+            "top_k": 5,
+            "max_context_chars": 6500,
+            "num_ctx": 4096,
+            "think": False,
+            "keep_alive": 0,
+        },
+    },
+    "balanced": {
+        "label": "Balanced",
+        "description": "Faster follow-up questions and background processing.",
+        "search": {"batch_size": 32},
+        "translation": {"max_per_cycle": 2},
+        "background": {"interval_seconds": 60},
+        "qa": {
+            "top_k": 6,
+            "max_context_chars": 9000,
+            "num_ctx": 4096,
+            "think": False,
+            "keep_alive": "5m",
+        },
+    },
+}
+
+
 DEFAULT_CONFIG = {
     "input_dir": "inbox",
     "workspace_dir": "workspace",
     "allowed_extensions": [".pdf", ".docx", ".txt", ".md"],
+    "performance": {
+        "profile": "economy",
+    },
     "ocr": {
         "enabled": True,
         "languages": "eng+rus+ukr",
@@ -57,6 +92,7 @@ DEFAULT_CONFIG = {
         "max_chars_per_request": 1800,
         "auto_install_models": True,
         "passive_enabled": True,
+        "max_per_cycle": 1,
     },
     "background": {
         "enabled": True,
@@ -92,6 +128,7 @@ class Settings:
     input_dir: Path
     workspace_dir: Path
     allowed_extensions: frozenset[str]
+    performance: dict[str, Any]
     ocr: dict[str, Any]
     classification: dict[str, Any]
     search: dict[str, Any]
@@ -139,6 +176,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         input_dir=_resolve(root, data["input_dir"]),
         workspace_dir=_resolve(root, data["workspace_dir"]),
         allowed_extensions=frozenset(_normalize_ext(x) for x in data["allowed_extensions"]),
+        performance=data["performance"],
         ocr=data["ocr"],
         classification=data["classification"],
         search=data["search"],
@@ -170,6 +208,21 @@ def update_config(path: str | Path, patch: dict[str, Any]) -> Path:
     _atomic_write_json(path, data)
     return path
 
+
+
+def performance_profile_patch(profile: str) -> dict[str, Any]:
+    """Return the complete config patch for a supported local performance profile."""
+    profile = str(profile).strip().casefold()
+    if profile not in PERFORMANCE_PROFILES:
+        raise ValueError(f"Unknown performance profile: {profile}")
+    selected = PERFORMANCE_PROFILES[profile]
+    return {
+        "performance": {"profile": profile},
+        "search": dict(selected["search"]),
+        "translation": dict(selected["translation"]),
+        "background": dict(selected["background"]),
+        "qa": dict(selected["qa"]),
+    }
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
