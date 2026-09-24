@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     },
     "background": {
         "enabled": True,
+        "initial_delay_seconds": 3,
         "interval_seconds": 60,
         "auto_index": True,
     },
