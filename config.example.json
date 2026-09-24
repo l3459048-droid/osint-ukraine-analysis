@@ -7,6 +7,9 @@
     ".txt",
     ".md"
   ],
+  "performance": {
+    "profile": "economy"
+  },
   "ocr": {
     "enabled": true,
     "languages": "eng+rus+ukr",
@@ -81,7 +84,7 @@
     "min_chunk_chars": 80,
     "semantic_enabled": true,
     "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    "batch_size": 32,
+    "batch_size": 12,
     "auto_embed": false
   },
   "translation": {
@@ -91,20 +94,21 @@
     "default_target": "ru",
     "max_chars_per_request": 1800,
     "auto_install_models": true,
-    "passive_enabled": true
+    "passive_enabled": true,
+    "max_per_cycle": 1
   },
   "background": {
     "enabled": true,
     "initial_delay_seconds": 3,
-    "interval_seconds": 60,
+    "interval_seconds": 90,
     "auto_index": true
   },
   "qa": {
     "enabled": true,
     "base_url": "http://127.0.0.1:11434",
     "model": "qwen3:1.7b",
-    "top_k": 6,
-    "max_context_chars": 8000,
+    "top_k": 5,
+    "max_context_chars": 6500,
     "num_ctx": 4096,
     "think": false,
     "keep_alive": 0
