@@ -713,17 +713,20 @@ def test_qa_uses_retrieved_document_sources_with_local_client(tmp_path: Path):
             captured["messages"] = messages
             return "FPV drones are used for reconnaissance [1]."
 
+        progress_events = []
         result = ask_documents(
             pipeline.db,
             "What are FPV drones used for?",
             settings.search,
             {"base_url": "http://127.0.0.1:11434", "model": "fake-local", "top_k": 4, "max_context_chars": 5000},
             chat_client=fake_chat,
+            progress=progress_events.append,
         )
         assert "[1]" in result.answer
         assert result.sources[0].source_path == "qa.txt"
         assert captured["model"] == "fake-local"
         assert "qa.txt" in captured["messages"][1]["content"]
+        assert progress_events == ["searching", "generating", "done"]
     finally:
         pipeline.close()
 
@@ -778,4 +781,87 @@ def test_failed_document_is_retried_on_next_scan(tmp_path: Path):
         result = pipeline.process_file(source)
         assert result.status == "processed"
     finally:
+        pipeline.close()
+
+
+def test_web_ask_runs_in_background_and_preserves_result(tmp_path: Path, monkeypatch):
+    import re
+    import time
+    import urllib.parse
+    import urllib.request
+
+    import osint_local.web as web
+    from osint_local.qa import QAResult
+    from osint_local.search import SearchHit
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        hit = SearchHit(
+            score=1.0,
+            backend="lexical",
+            document_sha256="a" * 64,
+            source_path="qa.txt",
+            page=1,
+            chunk_index=0,
+            text="FPV drones are mentioned in reconnaissance context.",
+        )
+
+        def fake_ask(db, question, search_config, qa_config, *, progress=None, **kwargs):
+            if progress:
+                progress("searching")
+                progress("generating")
+            time.sleep(0.05)
+            if progress:
+                progress("done")
+            return QAResult(question, "Test answer [1].", "fake-local", [hit])
+
+        monkeypatch.setattr(web, "ask_documents", fake_ask)
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/ask", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        match = re.search(r'name="csrf" value="([^"]+)"', body)
+        assert match
+        csrf = match.group(1)
+
+        request = urllib.request.Request(
+            base + "/api/ask",
+            data=urllib.parse.urlencode({"csrf": csrf, "q": "What about FPV?"}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            state = json.loads(response.read().decode("utf-8"))
+            assert response.status == 202
+            assert state["status"] == "running"
+
+        deadline = time.time() + 5
+        state = {"status": "running"}
+        while state["status"] == "running" and time.time() < deadline:
+            with urllib.request.urlopen(base + "/api/ask-status", timeout=5) as response:
+                state = json.loads(response.read().decode("utf-8"))
+            time.sleep(0.02)
+
+        assert state["status"] == "succeeded"
+        assert "Test answer" in state["html"]
+        assert "qa.txt" in state["html"]
+
+        with urllib.request.urlopen(base + "/api/ask-status", timeout=5) as response:
+            persisted = json.loads(response.read().decode("utf-8"))
+        assert persisted["status"] == "succeeded"
+        assert persisted["html"] == state["html"]
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
         pipeline.close()
