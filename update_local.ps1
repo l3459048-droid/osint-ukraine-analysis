@@ -59,6 +59,13 @@ try {
         }
     }
 
+    foreach ($Legacy in @("START_OSINT.vbs", "STOP_OSINT.vbs", "UPDATE_OSINT.vbs")) {
+        $LegacyPath = Join-Path $Root $Legacy
+        if (Test-Path $LegacyPath) {
+            Remove-Item -Path $LegacyPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     $Python = Join-Path $Root ".venv\Scripts\python.exe"
     if (Test-Path $Python) {
         Write-Step "Refreshing Python package"
