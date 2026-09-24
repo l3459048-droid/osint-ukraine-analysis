@@ -87,7 +87,7 @@ class LocalPipeline:
         try:
             extracted = extract(path, self.settings.ocr)
             classes = classify(extracted.text, self.settings.classification)
-            chunks = build_chunks(extracted.pages, extracted.text, self.settings.search)
+            chunks = build_chunks(extracted.text, self.settings.search)
             now = datetime.now(timezone.utc).isoformat()
             page_metadata = [
                 {key: value for key, value in page.items() if key != "text"}
