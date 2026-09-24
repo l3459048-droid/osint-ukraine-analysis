@@ -36,7 +36,7 @@ PERFORMANCE_PROFILES = {
         "search": {"batch_size": 12},
         "translation": {
             "max_per_cycle": 1,
-            "fast_batch_tokens": 2048,
+            "fast_batch_tokens": 0,
             "fast_text_batch": 16,
         },
         "background": {"interval_seconds": 90},
@@ -55,7 +55,7 @@ PERFORMANCE_PROFILES = {
         "search": {"batch_size": 32},
         "translation": {
             "max_per_cycle": 2,
-            "fast_batch_tokens": 4096,
+            "fast_batch_tokens": 0,
             "fast_text_batch": 32,
         },
         "background": {"interval_seconds": 60},
