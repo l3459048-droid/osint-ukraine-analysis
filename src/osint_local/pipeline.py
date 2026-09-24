@@ -13,6 +13,7 @@ from .classifier import classify
 from .config import Settings
 from .db import Database
 from .extractors import extract
+from .translation import detect_language
 
 LOG = logging.getLogger("osint_local")
 
@@ -30,6 +31,7 @@ class LocalPipeline:
         self.settings = settings
         self._prepare_dirs()
         self.db = Database(settings.db_path)
+        self._backfill_languages()
 
     def close(self) -> None:
         self.db.close()
@@ -87,6 +89,7 @@ class LocalPipeline:
         try:
             extracted = extract(path, self.settings.ocr)
             classes = classify(extracted.text, self.settings.classification)
+            language = detect_language(extracted.text) if extracted.text.strip() else None
             chunks = build_chunks(extracted.text, self.settings.search)
             now = datetime.now(timezone.utc).isoformat()
             page_metadata = [
@@ -102,6 +105,7 @@ class LocalPipeline:
                 "processed_at": now,
                 "extraction_method": extracted.method,
                 "text_chars": len(extracted.text),
+                "language": language,
                 "pages": page_metadata,
                 "chunks": len(chunks),
                 "classifications": [
@@ -120,6 +124,7 @@ class LocalPipeline:
                 text_chars=len(extracted.text),
                 processed_at=now,
                 metadata_json=json.dumps(metadata, ensure_ascii=False),
+                language=language,
                 classifications=classes,
                 chunks=chunks,
             )
@@ -139,6 +144,16 @@ class LocalPipeline:
             self.db.mark_error(sha256, f"{type(exc).__name__}: {exc}")
             LOG.exception("Failed processing %s", source_path)
             return ProcessResult(path, "error", sha256, str(exc))
+
+    def _backfill_languages(self) -> None:
+        for row in self.db.documents_missing_language(limit=5000):
+            text_path = self.settings.text_dir / f"{row['sha256']}.txt"
+            if not text_path.is_file():
+                continue
+            text = text_path.read_text(encoding="utf-8", errors="replace")
+            if not text.strip():
+                continue
+            self.db.update_document_language(row["sha256"], detect_language(text))
 
     def _prepare_dirs(self) -> None:
         for p in (
