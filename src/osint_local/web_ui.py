@@ -76,6 +76,8 @@ def _action_panel(
     embedding_count: int,
     chunk_count: int,
     input_dir,
+    background_enabled: bool = True,
+    background_interval: int = 60,
 ) -> str:
     running = action.get("status") == "running"
     current = int(action.get("current") or 0)
@@ -84,28 +86,28 @@ def _action_panel(
     status = action.get("message") or "Ready"
     if running and total:
         status = f"{status} · {current}/{total}"
-    index_status, index_label, index_permanent_disabled = _index_state(
+    index_status, _, _ = _index_state(
         semantic_available=semantic_available,
         semantic_enabled=semantic_enabled,
         embedding_count=embedding_count,
         chunk_count=chunk_count,
     )
-    index_disabled = running or index_permanent_disabled
     buttons_disabled = " disabled" if running else ""
-    index_disabled_attr = " disabled" if index_disabled else ""
-    index_permanent_attr = ' data-permanent-disabled="1"' if index_permanent_disabled else ""
+    automation = (
+        f"Automatic · every {int(background_interval)}s"
+        if background_enabled
+        else "Automatic processing off"
+    )
     return f"""<section class="action-panel" data-action-panel>
 <div class="action-copy"><strong>Library</strong><span data-action-status>{_e(status)}</span></div>
 <div class="action-buttons">
-<form action="/actions/scan" method="post" data-action-form><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{buttons_disabled}>Scan</button></form>
-<form action="/actions/index" method="post" data-action-form><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="secondary" type="submit"{index_disabled_attr}{index_permanent_attr}>{_e(index_label)}</button></form>
+<form action="/actions/maintenance" method="post" data-action-form><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{buttons_disabled}>Process now</button></form>
 <form action="/actions/open-folder" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="ghost-action" type="submit">Folder</button></form>
 <a class="button ghost" href="/settings">Settings</a>
 </div>
-<div class="action-meta"><span>{_e(index_status)}</span><span class="path-note" title="{_e(input_dir)}">{_e(input_dir)}</span></div>
+<div class="action-meta"><span>{_e(automation)} · {_e(index_status)}</span><span class="path-note" title="{_e(input_dir)}">{_e(input_dir)}</span></div>
 <div class="progress-track{' running' if running and not total else ''}" aria-hidden="true"><span data-action-progress style="width:{percent}%"></span></div>
 </section>"""
-
 
 def _setup_panel(csrf_token: str, input_dir) -> str:
     return f"""<section class="setup-panel">
@@ -129,7 +131,7 @@ def _settings_panel(csrf_token: str, input_dir, workspace_dir, translations_dir=
 <div class="settings-row"><div><span class="setting-label">Workspace</span><strong>{_e(workspace_dir)}</strong><p>Database, extracted text and index. Managed automatically.</p></div></div>
 <div class="settings-row"><div><span class="setting-label">Semantic index</span><strong>{_e(index_status)}</strong><p>{embedding_count} embeddings for {chunk_count} chunks.</p></div></div>
 <div class="settings-row"><div><span class="setting-label">Translations</span><strong>{_e(translations_dir or "translations")}</strong><p>Only English/Ukrainian → Russian. Originals are never changed.</p></div><div class="settings-actions"><form action="/actions/open-translations" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="secondary" type="submit">Open</button></form></div></div>
-<div class="settings-row"><div><span class="setting-label">Passive mode</span><strong>{"On" if background_enabled else "Off"}</strong><p>Checks the library every {int(background_interval)}s, updates the index when available, and translates at most one eligible document per cycle{"" if passive_translation else " (translation disabled)"}.</p></div></div>
+<div class="settings-row"><div><span class="setting-label">Automatic processing</span><strong>{"On" if background_enabled else "Off"}</strong><p>After launch the app automatically checks for new or changed files, updates the semantic index, and translates at most one eligible document per cycle every {int(background_interval)}s{"" if passive_translation else " (translation disabled)"}.</p></div></div>
 <div class="settings-row"><div><span class="setting-label">Local Q&A</span><strong>{_e(qa_base_url)}</strong><p>Questions use retrieved document fragments and a local Ollama model.</p></div></div>
 </section>"""
 
@@ -260,7 +262,7 @@ def _classification_badges(classes) -> str:
 
 def _document_cards(rows, db) -> str:
     if not rows:
-        return '<div class="empty">No processed documents yet. Use <strong>Scan</strong> on the home page.</div>'
+        return '<div class="empty">No processed documents yet. Automatic processing will pick up supported files from the selected folder.</div>'
     cards = []
     for row in rows:
         classes = db.get_classifications(row["sha256"])
