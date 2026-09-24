@@ -8,7 +8,7 @@ from .actions import ActionBusyError, ActionManager
 class BackgroundLoop:
     """Periodically asks ActionManager for one serialized passive maintenance cycle."""
 
-    def __init__(self, manager: ActionManager, *, interval_seconds: int = 120, initial_delay: int = 8):
+    def __init__(self, manager: ActionManager, *, interval_seconds: int = 120, initial_delay: int = 3):
         self.manager = manager
         self.interval_seconds = max(15, int(interval_seconds))
         self.initial_delay = max(1, int(initial_delay))
