@@ -235,6 +235,25 @@ def choose_threading(settings) -> tuple[int, int]:
     return inter_threads, intra_threads
 
 
+def _load_sentencepiece_processor(spm_module, path: Path):
+    """Load a SentencePiece model from bytes to avoid native Windows Unicode-path issues."""
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read tokenizer model: {path}: {exc}") from exc
+    if not payload:
+        raise RuntimeError(f"Tokenizer model is empty: {path}")
+
+    processor = spm_module.SentencePieceProcessor()
+    try:
+        loaded = processor.LoadFromSerializedProto(payload)
+    except Exception as exc:
+        raise RuntimeError(f"Cannot load tokenizer model from memory: {path.name}: {exc}") from exc
+    if loaded is False:
+        raise RuntimeError(f"Cannot load tokenizer model from memory: {path.name}")
+    return processor
+
+
 class FastTranslator:
     def __init__(self, settings, source_lang: str, target_lang: str = "ru"):
         if not fast_model_ready(settings, source_lang, target_lang):
@@ -267,8 +286,14 @@ class FastTranslator:
             inter_threads=self.inter_threads,
             intra_threads=self.intra_threads,
         )
-        self.source_sp = spm.SentencePieceProcessor(model_file=str(self.model_dir / "source.spm"))
-        self.target_sp = spm.SentencePieceProcessor(model_file=str(self.model_dir / "target.spm"))
+        self.source_sp = _load_sentencepiece_processor(
+            spm,
+            self.model_dir / "source.spm",
+        )
+        self.target_sp = _load_sentencepiece_processor(
+            spm,
+            self.model_dir / "target.spm",
+        )
 
     def translate_texts(self, texts: Sequence[str]) -> list[str]:
         tokenized: list[list[str]] = []
