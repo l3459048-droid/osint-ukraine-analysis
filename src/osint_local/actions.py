@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
+from .fast_translation import prepare_fast_model
 from .translation import next_passive_translation, translate_document
 
 
@@ -39,9 +40,11 @@ class ActionManager:
         pipeline: LocalPipeline,
         *,
         index_builder: Callable[..., int] = build_embeddings,
+        interactive_busy: Callable[[], bool] | None = None,
     ) -> None:
         self.pipeline = pipeline
         self.index_builder = index_builder
+        self.interactive_busy = interactive_busy or (lambda: False)
         self._lock = threading.RLock()
         self._state = ActionState()
         self._thread: threading.Thread | None = None
@@ -61,6 +64,14 @@ class ActionManager:
 
     def start_maintenance(self) -> dict[str, Any]:
         return self._start("maintenance", self._run_maintenance)
+
+    def start_prepare_translation(self, source_lang: str) -> dict[str, Any]:
+        if source_lang not in {"en", "uk"}:
+            raise ValueError("Fast Translation supports en→ru and uk→ru")
+        return self._start(
+            "translation-setup",
+            lambda: self._run_prepare_translation(source_lang),
+        )
 
     def _start(self, kind: str, target: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
@@ -97,8 +108,11 @@ class ActionManager:
                 "scan": "Scan complete",
                 "index": "Index complete",
                 "translate": "Translation complete",
+                "translation-setup": "Fast Translation ready",
             }
-            if self._state.kind == "maintenance":
+            if self._state.kind == "maintenance" and result.get("paused"):
+                self._state.message = "Background paused for Chat/Ask"
+            elif self._state.kind == "maintenance":
                 counts = result.get("counts") or {}
                 changed = (
                     int(counts.get("processed", 0))
@@ -157,10 +171,29 @@ class ActionManager:
             source_lang=source_lang,
             target_lang=target_lang,
             progress=progress,
+            should_pause=self.interactive_busy,
+        )
+
+    def _run_prepare_translation(self, source_lang: str) -> dict[str, Any]:
+        return prepare_fast_model(
+            self.pipeline.settings,
+            source_lang,
+            "ru",
+            progress=lambda current, total, message: self._progress(current, total, message),
+            run_benchmark=True,
         )
 
     def _run_maintenance(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
+        if self.interactive_busy():
+            self._progress(0, 0, "Background paused for Chat/Ask")
+            return {
+                "paused": True,
+                "files_seen": 0,
+                "counts": counts,
+                "embedded_chunks": 0,
+                "translated": [],
+            }
 
         def scan_progress(current: int, total: int, result: ProcessResult | None) -> None:
             if result is not None:
@@ -173,6 +206,15 @@ class ActionManager:
         results = self.pipeline.scan(progress=scan_progress)
         embedded = 0
         settings = self.pipeline.settings
+        if self.interactive_busy():
+            self._progress(0, 0, "Background paused for Chat/Ask")
+            return {
+                "paused": True,
+                "files_seen": len(results),
+                "counts": counts,
+                "embedded_chunks": 0,
+                "translated": [],
+            }
         if (
             bool(settings.background.get("auto_index", True))
             and bool(settings.search.get("semantic_enabled", True))
@@ -190,10 +232,14 @@ class ActionManager:
                     max_per_cycle,
                     f"Checking translation queue… {item_index}/{max_per_cycle}",
                 )
+                if self.interactive_busy():
+                    self._progress(0, 0, "Background paused for Chat/Ask")
+                    break
                 item = next_passive_translation(
                     settings,
                     self.pipeline.db,
                     progress=lambda current, total, message: self._progress(current, total, message),
+                    should_pause=self.interactive_busy,
                 )
                 if not item:
                     break
