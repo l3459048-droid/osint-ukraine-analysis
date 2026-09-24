@@ -24,3 +24,19 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Test
         run: pytest -q
+
+
+  fast-translation-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install translation engines
+        run: python -m pip install -e ".[translate,fasttranslate]"
+      - name: Import Fast Translation stack
+        run: python -c "import ctranslate2, sentencepiece, transformers, argostranslate; print(ctranslate2.__version__)"
