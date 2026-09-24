@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS documents (
     processed_at TEXT,
     error TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
+    language TEXT,
     pipeline_version INTEGER NOT NULL DEFAULT 2
 );
 CREATE INDEX IF NOT EXISTS idx_documents_source_path ON documents(source_path);
@@ -84,10 +85,16 @@ class Database:
 
     def _migrate(self) -> None:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(documents)").fetchall()}
+        changed = False
         if "pipeline_version" not in columns:
             self.conn.execute(
                 "ALTER TABLE documents ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 1"
             )
+            changed = True
+        if "language" not in columns:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN language TEXT")
+            changed = True
+        if changed:
             self.conn.commit()
 
     def close(self) -> None:
@@ -212,14 +219,14 @@ class Database:
 
     def mark_done(
         self, *, sha256: str, extraction_method: str, text_chars: int,
-        processed_at: str, metadata_json: str,
+        processed_at: str, metadata_json: str, language: str | None,
         classifications: list[tuple[str, int]], chunks: list
     ) -> None:
         with self._lock:
             self.conn.execute(
                 """UPDATE documents SET status='done', extraction_method=?, text_chars=?,
-                   processed_at=?, error=NULL, metadata_json=?, pipeline_version=2 WHERE sha256=?""",
-                (extraction_method, text_chars, processed_at, metadata_json, sha256),
+                   processed_at=?, error=NULL, metadata_json=?, language=?, pipeline_version=2 WHERE sha256=?""",
+                (extraction_method, text_chars, processed_at, metadata_json, language, sha256),
             )
             self.conn.execute(
                 "DELETE FROM classifications WHERE document_sha256=?", (sha256,)
@@ -296,28 +303,117 @@ class Database:
             ).fetchone()
             return int(row["n"])
 
-    def iter_embeddings(self, model: str) -> list[sqlite3.Row]:
+    def iter_embeddings(self, model: str, filters: dict | None = None) -> list[sqlite3.Row]:
+        clause, params = self._document_filter_clause(filters, alias="d")
         with self._lock:
             return self.conn.execute(
-                """SELECT c.document_sha256, d.source_path, c.page, c.chunk_index,
-                          c.text, e.vector, e.dimension
-                   FROM embeddings e
-                   JOIN chunks c ON c.id = e.chunk_id
-                   JOIN documents d ON d.sha256 = c.document_sha256
-                   WHERE e.model=? AND d.status='done'
-                   ORDER BY c.id""",
-                (model,),
+                f"""SELECT c.document_sha256, d.source_path, c.page, c.chunk_index,
+                           c.text, e.vector, e.dimension
+                    FROM embeddings e
+                    JOIN chunks c ON c.id = e.chunk_id
+                    JOIN documents d ON d.sha256 = c.document_sha256
+                    WHERE e.model=? AND d.status='done'{clause}
+                    ORDER BY c.id""",
+                [model, *params],
             ).fetchall()
 
-    def iter_chunks(self) -> list[sqlite3.Row]:
+    def iter_chunks(self, filters: dict | None = None) -> list[sqlite3.Row]:
+        clause, params = self._document_filter_clause(filters, alias="d")
         with self._lock:
             return self.conn.execute(
-                """SELECT c.document_sha256, d.source_path, c.page, c.chunk_index, c.text
-                   FROM chunks c
-                   JOIN documents d ON d.sha256 = c.document_sha256
-                   WHERE d.status='done'
-                   ORDER BY c.id"""
+                f"""SELECT c.document_sha256, d.source_path, c.page, c.chunk_index, c.text
+                    FROM chunks c
+                    JOIN documents d ON d.sha256 = c.document_sha256
+                    WHERE d.status='done'{clause}
+                    ORDER BY c.id""",
+                params,
             ).fetchall()
+
+    def update_document_language(self, sha256: str, language: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                "UPDATE documents SET language=? WHERE sha256=?",
+                (language, sha256),
+            )
+            self.conn.commit()
+
+    def documents_missing_language(self, *, limit: int = 5000) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                """SELECT sha256, source_path FROM documents
+                   WHERE status='done' AND (language IS NULL OR language='')
+                   ORDER BY id LIMIT ?""",
+                (max(1, min(5000, int(limit))),),
+            ).fetchall()
+
+    def folder_choices(self) -> list[str]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT source_path FROM documents WHERE status='done' ORDER BY source_path"
+            ).fetchall()
+        folders: set[str] = set()
+        for row in rows:
+            parts = str(row["source_path"]).replace("\\", "/").split("/")
+            if len(parts) <= 1:
+                continue
+            current: list[str] = []
+            for part in parts[:-1]:
+                current.append(part)
+                folders.add("/".join(current))
+        return sorted(folders, key=lambda value: value.casefold())
+
+    @staticmethod
+    def _document_filter_clause(filters: dict | None, *, alias: str = "d") -> tuple[str, list[Any]]:
+        if not filters:
+            return "", []
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        language = str(filters.get("language") or "").strip().casefold()
+        if language in {"en", "uk", "ru"}:
+            conditions.append(f"{alias}.language=?")
+            params.append(language)
+
+        domain = str(filters.get("domain") or "").strip()
+        if domain:
+            conditions.append(
+                f"""EXISTS (
+                    SELECT 1 FROM classifications cf
+                    WHERE cf.document_sha256={alias}.sha256 AND cf.domain=?
+                )"""
+            )
+            params.append(domain)
+
+        prefix = str(filters.get("source_prefix") or "").strip().replace("\\", "/").strip("/")
+        if prefix:
+            conditions.append(
+                f"(REPLACE({alias}.source_path, '\\', '/')=? OR REPLACE({alias}.source_path, '\\', '/') LIKE ?)"
+            )
+            params.extend([prefix, prefix + "/%"])
+
+        shas = [
+            str(value).strip()
+            for value in (filters.get("document_sha256s") or [])
+            if str(value).strip()
+        ]
+        if shas:
+            placeholders = ",".join("?" for _ in shas)
+            conditions.append(f"{alias}.sha256 IN ({placeholders})")
+            params.extend(shas)
+
+        date_from_ns = filters.get("date_from_ns")
+        if date_from_ns is not None:
+            conditions.append(f"{alias}.source_mtime_ns>=?")
+            params.append(int(date_from_ns))
+
+        date_to_ns = filters.get("date_to_ns")
+        if date_to_ns is not None:
+            conditions.append(f"{alias}.source_mtime_ns<?")
+            params.append(int(date_to_ns))
+
+        if not conditions:
+            return "", []
+        return " AND " + " AND ".join(conditions), params
 
 
     def recent_errors(self, *, limit: int = 10) -> list[dict[str, Any]]:
