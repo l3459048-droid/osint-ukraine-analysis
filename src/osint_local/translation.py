@@ -211,6 +211,56 @@ def _atomic_write(path: Path, content: str) -> None:
     tmp.replace(path)
 
 
+def translation_queue_status(settings, db, *, available_pairs=None, limit: int = 500) -> dict:
+    """Return lightweight EN/UK → RU translation queue statistics."""
+    pairs = set(available_pairs) if available_pairs is not None else (
+        installed_pairs() if argos_available() else set()
+    )
+    eligible = 0
+    translated = 0
+    ready = 0
+    blocked = 0
+    russian = 0
+    unknown = 0
+    scanned = 0
+
+    for doc in db.list_documents(limit=max(1, min(5000, int(limit)))):
+        scanned += 1
+        sha256 = doc["sha256"]
+        text_path = settings.text_dir / f"{sha256}.txt"
+        if not text_path.is_file():
+            unknown += 1
+            continue
+        text = text_path.read_text(encoding="utf-8", errors="replace")
+        src = detect_language(text)
+        if src == "ru":
+            russian += 1
+            continue
+        if src not in {"en", "uk"}:
+            unknown += 1
+            continue
+
+        eligible += 1
+        if db.get_translation(sha256, src, "ru"):
+            translated += 1
+        elif (src, "ru") in pairs:
+            ready += 1
+        else:
+            blocked += 1
+
+    return {
+        "scanned": scanned,
+        "eligible": eligible,
+        "translated": translated,
+        "pending": ready + blocked,
+        "ready": ready,
+        "blocked": blocked,
+        "russian": russian,
+        "unknown": unknown,
+        "pairs": sorted(f"{src}->{dst}" for src, dst in pairs if dst == "ru"),
+    }
+
+
 def next_passive_translation(settings, db, *, progress=None, translator=None, available_pairs=None) -> dict | None:
     """Translate at most one EN/UK document to Russian without installing models in the background."""
     if translator is None and not argos_available():
