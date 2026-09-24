@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import mimetypes
 import re
+import secrets
 import threading
 import webbrowser
 from dataclasses import asdict
@@ -12,10 +14,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+from .actions import ActionBusyError, ActionManager
 from .config import Settings
 from .pipeline import LocalPipeline
 from .search import search_chunks
 from .web_ui import (
+    _action_panel,
+    _activity_details,
     _category_list,
     _chunk_card,
     _classification_badges,
@@ -46,6 +51,8 @@ class DashboardServer(ThreadingHTTPServer):
         super().__init__(address, DashboardHandler)
         self.pipeline = pipeline
         self.settings = pipeline.settings
+        self.actions = ActionManager(pipeline)
+        self.csrf_token = secrets.token_urlsafe(32)
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -70,12 +77,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._api_search(query)
             elif path == "/api/stats":
                 self._json(self._stats_payload())
+            elif path == "/api/activity":
+                self._json(self._activity_payload())
             else:
                 self._error(HTTPStatus.NOT_FOUND, "Page not found")
         except BrokenPipeError:
             return
         except Exception as exc:  # pragma: no cover - defensive server boundary
             LOG.exception("Web request failed: %s", self.path)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Internal error: {exc}")
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        try:
+            if path == "/actions/scan":
+                self._start_action("scan")
+            elif path == "/actions/index":
+                self._start_action("index")
+            else:
+                self._error(HTTPStatus.NOT_FOUND, "Page not found")
+        except BrokenPipeError:
+            return
+        except Exception as exc:  # pragma: no cover - defensive server boundary
+            LOG.exception("Web POST failed: %s", self.path)
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Internal error: {exc}")
 
     def do_HEAD(self) -> None:  # noqa: N802
@@ -104,13 +129,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._search_page(query)
             return
         stats = self._stats_payload()
+        action = self.server.actions.snapshot()
         recent = self.db.list_documents(limit=12)
+        semantic_available = importlib.util.find_spec("sentence_transformers") is not None
+        semantic_ready = bool(stats["chunks"] and stats["embedding_count"] >= stats["chunks"])
         body = [
             _hero(),
+            _action_panel(
+                self.server.csrf_token,
+                action,
+                semantic_available=semantic_available,
+                semantic_ready=semantic_ready,
+                embedding_count=stats["embedding_count"],
+                chunk_count=stats["chunks"],
+            ),
             '<section class="stats-grid">',
             _stat_card("Documents", stats["documents"]),
             _stat_card("Chunks", stats["chunks"]),
-            _stat_card("Embeddings", stats["embedding_count"]),
+            _stat_card("Semantic", "Ready" if semantic_ready else f'{stats["embedding_count"]}/{stats["chunks"]}'),
             _stat_card("Categories", len(stats["categories"])),
             "</section>",
             _search_form("", "auto", 10),
@@ -122,6 +158,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             '<a href="/documents">View all</a></div>',
             _document_cards(recent, self.db),
             "</section></div>",
+            _activity_details(action, self.db.recent_errors(limit=6)),
         ]
         self._html("OSINT Local", "".join(body))
 
@@ -210,7 +247,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             '<section class="panel"><div class="panel-head"><h2>Extracted chunks</h2></div>',
         ]
         if not chunks:
-            body.append('<div class="empty">No chunks stored for this document. Run osint-local scan.</div>')
+            body.append('<div class="empty">No chunks stored for this document. Use Scan on the home page.</div>')
         for chunk in chunks:
             body.append(_chunk_card(chunk, source_url))
         body.append("</section>")
@@ -237,13 +274,71 @@ class DashboardHandler(BaseHTTPRequestHandler):
         raw = self.db.stats()
         model = str(self.settings.search.get("model") or "")
         return {
-            "documents": raw["total"],
+            "documents": self.db.document_count(),
             "statuses": raw["statuses"],
             "chunks": raw["chunks"],
             "embedding_count": raw["embeddings"].get(model, 0),
             "embedding_model": model,
             "categories": self.db.category_counts(),
         }
+
+    def _activity_payload(self) -> dict:
+        return {
+            "action": self.server.actions.snapshot(),
+            "stats": self._stats_payload(),
+            "errors": self.db.recent_errors(limit=6),
+        }
+
+    def _start_action(self, kind: str) -> None:
+        data = self._form_data()
+        token = data.get("csrf", "")
+        if not token or not secrets.compare_digest(token, self.server.csrf_token):
+            self._action_response(
+                {"error": "Invalid action token. Refresh the page and try again."},
+                status=HTTPStatus.FORBIDDEN,
+            )
+            return
+        try:
+            if kind == "scan":
+                action = self.server.actions.start_scan()
+            elif kind == "index":
+                if importlib.util.find_spec("sentence_transformers") is None:
+                    self._action_response(
+                        {"error": "Semantic search is not installed. Install the optional search dependencies first."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                action = self.server.actions.start_index()
+            else:
+                self._action_response({"error": "Unknown action"}, status=HTTPStatus.NOT_FOUND)
+                return
+        except ActionBusyError as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self._action_response({"action": action}, status=HTTPStatus.ACCEPTED)
+
+    def _form_data(self) -> dict[str, str]:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length < 0 or length > 64 * 1024:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        parsed = parse_qs(raw, keep_blank_values=True)
+        return {key: values[0] if values else "" for key, values in parsed.items()}
+
+    def _action_response(self, data: dict, *, status: HTTPStatus) -> None:
+        if self.headers.get("X-Requested-With") == "fetch":
+            self._json(data, status=status)
+            return
+        if status.value < 400:
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        self._html(str(status.value), _page_header(str(status.value), str(data.get("error") or "Action failed")), status=status)
 
     def _source(self, sha256: str, *, head_only: bool) -> None:
         if not SHA_RE.fullmatch(sha256):
@@ -362,4 +457,3 @@ def serve(
         pass
     finally:
         server.server_close()
-

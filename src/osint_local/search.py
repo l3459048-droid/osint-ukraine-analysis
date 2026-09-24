@@ -4,7 +4,7 @@ import math
 import re
 from array import array
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 from .db import Database
 
@@ -52,6 +52,7 @@ def build_embeddings(
     force: bool = False,
     encoder: Encoder | None = None,
     document_sha256: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> int:
     model = str(config.get("model") or DEFAULT_MODEL)
     rows = db.chunks_for_embedding(model, force=force, document_sha256=document_sha256)
@@ -61,6 +62,8 @@ def build_embeddings(
     encoder = encoder or SentenceTransformerEncoder(model)
     batch_size = max(1, int(config.get("batch_size", 32)))
     written = 0
+    if progress:
+        progress(0, len(rows))
     for offset in range(0, len(rows), batch_size):
         batch = rows[offset:offset + batch_size]
         vectors = encoder.encode([row["text"] for row in batch])
@@ -72,6 +75,8 @@ def build_embeddings(
             payload.append((row["id"], model, len(normalized), _vector_to_blob(normalized)))
         db.save_embeddings(payload)
         written += len(payload)
+        if progress:
+            progress(written, len(rows))
     return written
 
 

@@ -307,6 +307,24 @@ class Database:
                    ORDER BY c.id"""
             ).fetchall()
 
+
+    def recent_errors(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT source_path, error, processed_at FROM documents
+                   WHERE status='error' AND error IS NOT NULL
+                   ORDER BY id DESC LIMIT ?""",
+                (max(1, min(100, int(limit))),),
+            ).fetchall()
+        return [
+            {
+                "source_path": row["source_path"],
+                "error": row["error"],
+                "processed_at": row["processed_at"],
+            }
+            for row in rows
+        ]
+
     def stats(self) -> dict[str, Any]:
         with self._lock:
             rows = self.conn.execute(

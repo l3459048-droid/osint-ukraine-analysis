@@ -6,7 +6,9 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
+from .chunking import build_chunks
 from .classifier import classify
 from .config import Settings
 from .db import Database
@@ -14,12 +16,14 @@ from .extractors import extract
 
 LOG = logging.getLogger("osint_local")
 
+
 @dataclass
 class ProcessResult:
     path: Path
     status: str
     sha256: str | None = None
     message: str = ""
+
 
 class LocalPipeline:
     def __init__(self, settings: Settings):
@@ -30,11 +34,24 @@ class LocalPipeline:
     def close(self) -> None:
         self.db.close()
 
-    def scan(self, force: bool = False) -> list[ProcessResult]:
+    def scan(
+        self,
+        force: bool = False,
+        progress: Callable[[int, int, ProcessResult | None], None] | None = None,
+    ) -> list[ProcessResult]:
+        paths = [
+            path
+            for path in sorted(self.settings.input_dir.rglob("*"))
+            if path.is_file() and path.suffix.lower() in self.settings.allowed_extensions
+        ]
         results: list[ProcessResult] = []
-        for path in sorted(self.settings.input_dir.rglob("*")):
-            if path.is_file() and path.suffix.lower() in self.settings.allowed_extensions:
-                results.append(self.process_file(path, force=force))
+        if progress:
+            progress(0, len(paths), None)
+        for index, path in enumerate(paths, start=1):
+            result = self.process_file(path, force=force)
+            results.append(result)
+            if progress:
+                progress(index, len(paths), result)
         return results
 
     def process_file(self, path: str | Path, force: bool = False) -> ProcessResult:
@@ -51,7 +68,12 @@ class LocalPipeline:
 
         sha256 = sha256_file(path)
         existing = self.db.find_by_hash(sha256)
-        if existing and existing["status"] == "done" and not force:
+        if (
+            existing
+            and existing["status"] == "done"
+            and int(existing["pipeline_version"] or 1) >= 2
+            and not force
+        ):
             return ProcessResult(path, "duplicate", sha256, "content already processed")
 
         self.db.upsert_processing(
@@ -65,7 +87,12 @@ class LocalPipeline:
         try:
             extracted = extract(path, self.settings.ocr)
             classes = classify(extracted.text, self.settings.classification)
+            chunks = build_chunks(extracted.pages, extracted.text, self.settings.search)
             now = datetime.now(timezone.utc).isoformat()
+            page_metadata = [
+                {key: value for key, value in page.items() if key != "text"}
+                for page in extracted.pages
+            ]
             metadata = {
                 "document_id": sha256,
                 "source_path": source_path,
@@ -75,7 +102,8 @@ class LocalPipeline:
                 "processed_at": now,
                 "extraction_method": extracted.method,
                 "text_chars": len(extracted.text),
-                "pages": extracted.pages,
+                "pages": page_metadata,
+                "chunks": len(chunks),
                 "classifications": [
                     {"domain": domain, "score": score} for domain, score in classes
                 ],
@@ -93,8 +121,19 @@ class LocalPipeline:
                 processed_at=now,
                 metadata_json=json.dumps(metadata, ensure_ascii=False),
                 classifications=classes,
+                chunks=chunks,
             )
-            LOG.info("Processed %s -> %s", source_path, sha256[:12])
+
+            if bool(self.settings.search.get("auto_embed", False)):
+                from .search import build_embeddings
+
+                build_embeddings(
+                    self.db,
+                    self.settings.search,
+                    document_sha256=sha256,
+                )
+
+            LOG.info("Processed %s -> %s (%s chunks)", source_path, sha256[:12], len(chunks))
             return ProcessResult(path, "processed", sha256)
         except Exception as exc:
             self.db.mark_error(sha256, f"{type(exc).__name__}: {exc}")

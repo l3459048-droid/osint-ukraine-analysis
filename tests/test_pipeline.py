@@ -305,3 +305,126 @@ def test_web_ui_dashboard_search_document_and_range_source(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+def test_action_manager_scan_reports_progress(tmp_path: Path):
+    import time
+    from osint_local.actions import ActionManager
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "action.txt").write_text("fpv drone " * 30, encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    try:
+        manager = ActionManager(pipeline)
+        started = manager.start_scan()
+        assert started["status"] == "running"
+        deadline = time.time() + 5
+        state = manager.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = manager.snapshot()
+        assert state["status"] == "succeeded"
+        assert state["result"]["files_seen"] == 1
+        assert state["result"]["counts"]["processed"] == 1
+        assert pipeline.db.document_count() == 1
+    finally:
+        pipeline.close()
+
+
+def test_embedding_progress_callback(tmp_path: Path):
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "semantic.txt").write_text("fpv drone " * 80, encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    progress = []
+    try:
+        pipeline.scan()
+        count = build_embeddings(
+            pipeline.db,
+            settings.search,
+            encoder=FakeEncoder(),
+            progress=lambda current, total: progress.append((current, total)),
+        )
+        assert count > 0
+        assert progress[0][0] == 0
+        assert progress[-1][0] == progress[-1][1] == count
+    finally:
+        pipeline.close()
+
+
+def test_web_ui_scan_action_csrf_and_activity(tmp_path: Path):
+    import re
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "from-ui.txt").write_text("fpv drone logistics " * 20, encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "Build index" in body
+        assert "Activity" in body
+        match = re.search(r'name="csrf" value="([^"]+)"', body)
+        assert match
+        csrf = match.group(1)
+
+        bad = urllib.request.Request(
+            base + "/actions/scan",
+            data=urllib.parse.urlencode({"csrf": "bad"}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(bad, timeout=5)
+            assert False, "invalid CSRF should fail"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+
+        request = urllib.request.Request(
+            base + "/actions/scan",
+            data=urllib.parse.urlencode({"csrf": csrf}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 202
+            assert payload["action"]["kind"] == "scan"
+
+        deadline = time.time() + 5
+        activity = {"action": {"status": "running"}}
+        while activity["action"]["status"] == "running" and time.time() < deadline:
+            with urllib.request.urlopen(base + "/api/activity", timeout=5) as response:
+                activity = json.loads(response.read().decode("utf-8"))
+            time.sleep(0.02)
+        assert activity["action"]["status"] == "succeeded"
+        assert activity["stats"]["documents"] == 1
+
+        with urllib.request.urlopen(base + "/", timeout=5) as response:
+            body = response.read().decode("utf-8")
+            assert "from-ui.txt" in body
+            assert "Scan complete" in body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()

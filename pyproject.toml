@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osint-local"
-version = "0.3.0"
-description = "Local-first OSINT document ingestion, search and Web UI"
+version = "0.4.0"
+description = "Local-first OSINT document ingestion, search and minimal Web UI actions"
 requires-python = ">=3.10"
 dependencies = [
   "PyMuPDF>=1.24,<2",
