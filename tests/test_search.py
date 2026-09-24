@@ -189,3 +189,69 @@ def test_auto_uses_hybrid_when_semantic_index_is_current(tmp_path: Path):
         assert hits[0].backend == "hybrid"
     finally:
         pipeline.close()
+
+
+def test_search_filters_intersect_folder_language_category_date_and_documents(tmp_path: Path):
+    import os
+    import time
+
+    settings = load_settings(make_config(tmp_path))
+    (settings.input_dir / "recent").mkdir(parents=True)
+    (settings.input_dir / "old").mkdir(parents=True)
+
+    recent_en = settings.input_dir / "recent" / "english.txt"
+    recent_uk = settings.input_dir / "recent" / "ukrainian.txt"
+    old_en = settings.input_dir / "old" / "english-old.txt"
+
+    recent_en.write_text("FPV logistics current English report.", encoding="utf-8")
+    recent_uk.write_text("FPV логістика український звіт ї є.", encoding="utf-8")
+    old_en.write_text("FPV logistics archived English report.", encoding="utf-8")
+
+    old = time.time() - 120 * 86400
+    os.utime(old_en, (old, old))
+
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.scan()
+        docs = {row["source_path"].replace("\\", "/"): row for row in pipeline.db.list_documents(limit=20)}
+        recent_en_row = docs["recent/english.txt"]
+
+        base_filters = {
+            "source_prefix": "recent",
+            "language": "en",
+            "domain": "Drones",
+            "date_from_ns": int((time.time() - 30 * 86400) * 1_000_000_000),
+        }
+        hits = search_chunks(
+            pipeline.db,
+            "FPV logistics",
+            settings.search,
+            mode="lexical",
+            filters=base_filters,
+        )
+        assert hits
+        assert {hit.source_path.replace("\\", "/") for hit in hits} == {"recent/english.txt"}
+
+        hits = search_chunks(
+            pipeline.db,
+            "FPV logistics",
+            settings.search,
+            mode="lexical",
+            filters={
+                **base_filters,
+                "document_sha256s": [recent_en_row["sha256"]],
+            },
+        )
+        assert hits
+        assert all(hit.document_sha256 == recent_en_row["sha256"] for hit in hits)
+
+        no_hits = search_chunks(
+            pipeline.db,
+            "FPV logistics",
+            settings.search,
+            mode="lexical",
+            filters={**base_filters, "language": "ru"},
+        )
+        assert no_hits == []
+    finally:
+        pipeline.close()
