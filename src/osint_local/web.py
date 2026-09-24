@@ -15,9 +15,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from .actions import ActionBusyError, ActionManager
-from .config import Settings
+from .config import Settings, load_settings, update_config
+from .desktop import open_folder, pick_folder
 from .pipeline import LocalPipeline
 from .search import search_chunks
+from .translation import argos_available, installed_pairs
 from .web_ui import (
     _action_panel,
     _activity_details,
@@ -37,7 +39,10 @@ from .web_ui import (
     _safe_json,
     _search_form,
     _search_hit,
+    _settings_panel,
+    _setup_panel,
     _stat_card,
+    _translation_panel,
 )
 
 LOG = logging.getLogger("osint_local.web")
@@ -47,12 +52,14 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, pipeline: LocalPipeline):
+    def __init__(self, address, pipeline: LocalPipeline, *, folder_opener=open_folder, folder_picker=pick_folder):
         super().__init__(address, DashboardHandler)
         self.pipeline = pipeline
         self.settings = pipeline.settings
         self.actions = ActionManager(pipeline)
         self.csrf_token = secrets.token_urlsafe(32)
+        self.folder_opener = folder_opener
+        self.folder_picker = folder_picker
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -69,10 +76,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._search_page(query)
             elif path == "/documents":
                 self._documents_page(query)
+            elif path == "/settings":
+                self._settings_page(query)
             elif path.startswith("/documents/"):
                 self._document_page(path.split("/", 2)[2])
             elif path.startswith("/source/"):
                 self._source(path.split("/", 2)[2], head_only=False)
+            elif path.startswith("/translation/"):
+                self._translation_file(path)
             elif path == "/api/search":
                 self._api_search(query)
             elif path == "/api/stats":
@@ -95,6 +106,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._start_action("scan")
             elif path == "/actions/index":
                 self._start_action("index")
+            elif path == "/actions/open-folder":
+                self._open_folder_action()
+            elif path == "/actions/open-translations":
+                self._open_translations_action()
+            elif path == "/actions/translate":
+                self._translate_action()
+            elif path == "/settings/input-dir":
+                self._set_input_dir_action()
+            elif path == "/settings/pick-folder":
+                self._pick_folder_action()
             else:
                 self._error(HTTPStatus.NOT_FOUND, "Page not found")
         except BrokenPipeError:
@@ -133,15 +154,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         recent = self.db.list_documents(limit=12)
         semantic_available = importlib.util.find_spec("sentence_transformers") is not None
         semantic_ready = bool(stats["chunks"] and stats["embedding_count"] >= stats["chunks"])
-        body = [
-            _hero(),
+        body = [_hero()]
+        if not bool(self.settings.ui.get("setup_complete", True)):
+            body.append(_setup_panel(self.server.csrf_token, self.settings.input_dir))
+        body.extend([
             _action_panel(
                 self.server.csrf_token,
                 action,
                 semantic_available=semantic_available,
                 semantic_ready=semantic_ready,
+                semantic_enabled=bool(self.settings.search.get("semantic_enabled", True)),
                 embedding_count=stats["embedding_count"],
                 chunk_count=stats["chunks"],
+                input_dir=self.settings.input_dir,
             ),
             '<section class="stats-grid">',
             _stat_card("Documents", stats["documents"]),
@@ -159,7 +184,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _document_cards(recent, self.db),
             "</section></div>",
             _activity_details(action, self.db.recent_errors(limit=6)),
-        ]
+        ])
         self._html("OSINT Local", "".join(body))
 
     def _search_page(self, query: dict[str, list[str]]) -> None:
@@ -213,6 +238,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         body.append("</section>")
         self._html(title, "".join(body))
 
+    def _settings_page(self, query: dict[str, list[str]]) -> None:
+        stats = self._stats_payload()
+        semantic_available = importlib.util.find_spec("sentence_transformers") is not None
+        body = [
+            _page_header("Settings", "A few local settings; everything else stays automatic."),
+            _settings_panel(
+                self.server.csrf_token,
+                self.settings.input_dir,
+                self.settings.workspace_dir,
+                self.settings.translations_dir,
+                semantic_available=semantic_available,
+                semantic_enabled=bool(self.settings.search.get("semantic_enabled", True)),
+                embedding_count=stats["embedding_count"],
+                chunk_count=stats["chunks"],
+            ),
+        ]
+        self._html("Settings", "".join(body))
+
     def _document_page(self, sha256: str) -> None:
         if not SHA_RE.fullmatch(sha256):
             self._error(HTTPStatus.NOT_FOUND, "Document not found")
@@ -244,6 +287,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             '<section class="panel"><div class="panel-head"><h2>Metadata</h2></div>',
             _metadata_grid(metadata, doc),
             "</section>",
+            _translation_panel(
+                self.server.csrf_token,
+                sha256,
+                self.db.list_translations(sha256),
+                available=argos_available(),
+                pairs=installed_pairs() if argos_available() else set(),
+                action=self.server.actions.snapshot(),
+            ),
             '<section class="panel"><div class="panel-head"><h2>Extracted chunks</h2></div>',
         ]
         if not chunks:
@@ -291,8 +342,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _start_action(self, kind: str) -> None:
         data = self._form_data()
-        token = data.get("csrf", "")
-        if not token or not secrets.compare_digest(token, self.server.csrf_token):
+        if not self._check_csrf(data):
             self._action_response(
                 {"error": "Invalid action token. Refresh the page and try again."},
                 status=HTTPStatus.FORBIDDEN,
@@ -317,6 +367,117 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._action_response({"action": action}, status=HTTPStatus.ACCEPTED)
 
+    def _check_csrf(self, data: dict[str, str]) -> bool:
+        token = data.get("csrf", "")
+        return bool(token and secrets.compare_digest(token, self.server.csrf_token))
+
+    def _open_folder_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        try:
+            self.server.folder_opener(self.settings.input_dir)
+        except Exception as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._action_response({"ok": True}, status=HTTPStatus.OK)
+
+    def _open_translations_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        self.settings.translations_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.server.folder_opener(self.settings.translations_dir)
+        except Exception as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._action_response({"ok": True}, status=HTTPStatus.OK)
+
+    def _translate_action(self) -> None:
+        data = self._form_data()
+        sha256 = data.get("sha256", "")
+        if not self._check_csrf(data):
+            self._action_response({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        if not SHA_RE.fullmatch(sha256) or not self.db.get_document(sha256):
+            self._action_response({"error": "Document not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        source_lang = data.get("source_lang", "auto")
+        target_lang = data.get("target_lang", "en")
+        if source_lang not in {"auto", "en", "ru", "uk"} or target_lang not in {"en", "ru", "uk"}:
+            self._action_response({"error": "Unsupported language"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not argos_available():
+            self._action_response({"error": "Offline translation is not installed. Install: pip install -e '.[translate]'"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            action = self.server.actions.start_translate(sha256, source_lang, target_lang)
+        except ActionBusyError as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        if self.headers.get("X-Requested-With") == "fetch":
+            self._json({"action": action}, status=HTTPStatus.ACCEPTED)
+            return
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", f"/documents/{sha256}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def _set_input_dir_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        raw = data.get("input_dir", "").strip()
+        if not raw:
+            self._action_response({"error": "Choose or enter a folder path."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (self.settings.project_root / path).resolve()
+        else:
+            path = path.resolve()
+        if not path.is_dir():
+            self._action_response({"error": f"Folder does not exist: {path}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if self.server.actions.snapshot().get("status") == "running":
+            self._action_response({"error": "Wait for the current action to finish before changing folders."}, status=HTTPStatus.CONFLICT)
+            return
+        self._apply_input_dir(path)
+        self._action_response({"ok": True, "input_dir": str(path)}, status=HTTPStatus.OK)
+
+    def _pick_folder_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        if self.server.actions.snapshot().get("status") == "running":
+            self._action_response({"error": "Wait for the current action to finish before changing folders."}, status=HTTPStatus.CONFLICT)
+            return
+        try:
+            path = self.server.folder_picker(self.settings.input_dir)
+        except Exception as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if path is None:
+            self._action_response({"ok": True, "cancelled": True}, status=HTTPStatus.OK)
+            return
+        self._apply_input_dir(Path(path).resolve())
+        self._action_response({"ok": True, "input_dir": str(path)}, status=HTTPStatus.OK)
+
+    def _apply_input_dir(self, path: Path) -> None:
+        update_config(
+            self.settings.config_path,
+            {"input_dir": str(path), "ui": {"setup_complete": True}},
+        )
+        settings = load_settings(self.settings.config_path)
+        settings.input_dir.mkdir(parents=True, exist_ok=True)
+        self.server.pipeline.settings = settings
+        self.server.settings = settings
+
     def _form_data(self) -> dict[str, str]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -339,6 +500,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         self._html(str(status.value), _page_header(str(status.value), str(data.get("error") or "Action failed")), status=status)
+
+    def _translation_file(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 4 or parts[0] != "translation":
+            self._error(HTTPStatus.NOT_FOUND, "Translation not found")
+            return
+        _, sha256, source_lang, target_lang = parts
+        if not SHA_RE.fullmatch(sha256):
+            self._error(HTTPStatus.NOT_FOUND, "Translation not found")
+            return
+        row = self.db.get_translation(sha256, source_lang, target_lang)
+        if not row:
+            self._error(HTTPStatus.NOT_FOUND, "Translation not found")
+            return
+        file_path = Path(row["output_path"]).expanduser().resolve()
+        try:
+            file_path.relative_to(self.settings.translations_dir.resolve())
+        except ValueError:
+            self._error(HTTPStatus.FORBIDDEN, "Invalid translation path")
+            return
+        if not file_path.is_file():
+            self._error(HTTPStatus.NOT_FOUND, "Translation file is missing")
+            return
+        self._send_file(file_path, head_only=False)
 
     def _source(self, sha256: str, *, head_only: bool) -> None:
         if not SHA_RE.fullmatch(sha256):
@@ -432,8 +617,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._html(str(status.value), _page_header(str(status.value), message), status=status)
 
 
-def create_server(pipeline: LocalPipeline, host: str = "127.0.0.1", port: int = 8080) -> DashboardServer:
-    return DashboardServer((host, port), pipeline)
+def create_server(
+    pipeline: LocalPipeline,
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    *,
+    folder_opener=open_folder,
+    folder_picker=pick_folder,
+) -> DashboardServer:
+    return DashboardServer((host, port), pipeline, folder_opener=folder_opener, folder_picker=folder_picker)
 
 
 def serve(

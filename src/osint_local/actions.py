@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
+from .translation import translate_document
 
 
 class ActionBusyError(RuntimeError):
@@ -54,6 +55,9 @@ class ActionManager:
     def start_index(self) -> dict[str, Any]:
         return self._start("index", self._run_index)
 
+    def start_translate(self, sha256: str, source_lang: str, target_lang: str) -> dict[str, Any]:
+        return self._start("translate", lambda: self._run_translate(sha256, source_lang, target_lang))
+
     def _start(self, kind: str, target: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
             if self._state.status == "running":
@@ -85,7 +89,8 @@ class ActionManager:
             return
         with self._lock:
             self._state.status = "succeeded"
-            self._state.message = "Scan complete" if self._state.kind == "scan" else "Index complete"
+            labels = {"scan": "Scan complete", "index": "Index complete", "translate": "Translation complete"}
+            self._state.message = labels.get(self._state.kind, "Action complete")
             self._state.result = result
             self._state.finished_at = _now()
             if self._state.total and self._state.current < self._state.total:
@@ -122,6 +127,19 @@ class ActionManager:
             "embedded_chunks": count,
             "model": self.pipeline.settings.search.get("model"),
         }
+
+    def _run_translate(self, sha256: str, source_lang: str, target_lang: str) -> dict[str, Any]:
+        def progress(current: int, total: int, message: str) -> None:
+            self._progress(current, total, message)
+
+        return translate_document(
+            self.pipeline.settings,
+            self.pipeline.db,
+            sha256,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            progress=progress,
+        )
 
     def _progress(self, current: int, total: int, message: str) -> None:
         with self._lock:

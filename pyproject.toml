@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osint-local"
-version = "0.4.0"
-description = "Local-first OSINT document ingestion, search and minimal Web UI actions"
+version = "0.5.0"
+description = "Local-first OSINT document ingestion, search, offline translation and minimal desktop-like Web UI"
 requires-python = ">=3.10"
 dependencies = [
   "PyMuPDF>=1.24,<2",
@@ -16,10 +16,12 @@ dependencies = [
 [project.optional-dependencies]
 ocr = ["Pillow>=10,<13", "pytesseract>=0.3.13,<1"]
 search = ["sentence-transformers>=6,<7"]
+translate = ["argostranslate>=1.9,<2"]
 all = [
   "Pillow>=10,<13",
   "pytesseract>=0.3.13,<1",
   "sentence-transformers>=6,<7",
+  "argostranslate>=1.9,<2",
 ]
 dev = ["pytest>=8,<10"]
 

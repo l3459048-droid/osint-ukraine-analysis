@@ -428,3 +428,191 @@ def test_web_ui_scan_action_csrf_and_activity(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_update_config_persists_input_dir_and_setup(tmp_path: Path):
+    from osint_local.config import update_config
+
+    config = make_config(tmp_path)
+    chosen = tmp_path / "documents"
+    chosen.mkdir()
+    update_config(config, {"input_dir": str(chosen), "ui": {"setup_complete": True}})
+    settings = load_settings(config)
+    assert settings.input_dir == chosen.resolve()
+    assert settings.ui["setup_complete"] is True
+
+
+def test_web_settings_can_change_document_folder(tmp_path: Path):
+    import re
+    import urllib.parse
+    import urllib.request
+    from osint_local.web import create_server
+
+    config = make_config(tmp_path)
+    settings = load_settings(config)
+    settings.input_dir.mkdir(parents=True)
+    chosen = tmp_path / "new-documents"
+    chosen.mkdir()
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/settings", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        match = re.search(r'name="csrf" value="([^"]+)"', body)
+        assert match
+        csrf = match.group(1)
+
+        request = urllib.request.Request(
+            base + "/settings/input-dir",
+            data=urllib.parse.urlencode({"csrf": csrf, "input_dir": str(chosen)}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert response.status == 200
+            assert Path(payload["input_dir"]) == chosen.resolve()
+
+        assert server.settings.input_dir == chosen.resolve()
+        assert pipeline.settings.input_dir == chosen.resolve()
+        saved = json.loads(config.read_text(encoding="utf-8"))
+        assert Path(saved["input_dir"]) == chosen.resolve()
+        assert saved["ui"]["setup_complete"] is True
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
+
+
+def test_web_open_folder_uses_injected_opener(tmp_path: Path):
+    import re
+    import urllib.parse
+    import urllib.request
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    opened = []
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        server = create_server(
+            pipeline,
+            "127.0.0.1",
+            0,
+            folder_opener=lambda path: opened.append(Path(path)),
+            folder_picker=lambda path: None,
+        )
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        match = re.search(r'name="csrf" value="([^"]+)"', body)
+        assert match
+        request = urllib.request.Request(
+            base + "/actions/open-folder",
+            data=urllib.parse.urlencode({"csrf": match.group(1)}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+        assert opened == [settings.input_dir]
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
+
+
+
+def test_cli_serve_first_run_creates_setup_config(tmp_path: Path, monkeypatch):
+    import sys
+    import osint_local.cli as cli
+    import osint_local.web as web
+
+    config = tmp_path / "config.json"
+    monkeypatch.setattr(sys, "argv", ["osint-local", "--config", str(config), "serve", "--no-open"])
+    monkeypatch.setattr(web, "serve", lambda pipeline, **kwargs: None)
+    assert cli.main() == 0
+    saved = json.loads(config.read_text(encoding="utf-8"))
+    assert saved["ui"]["setup_complete"] is False
+    assert (tmp_path / "inbox").is_dir()
+    assert (tmp_path / "workspace").is_dir()
+
+
+def test_index_state_reports_stale_and_current():
+    from osint_local.web_ui import _index_state
+
+    stale = _index_state(
+        semantic_available=True,
+        semantic_enabled=True,
+        embedding_count=3,
+        chunk_count=5,
+    )
+    current = _index_state(
+        semantic_available=True,
+        semantic_enabled=True,
+        embedding_count=5,
+        chunk_count=5,
+    )
+    assert stale[0].startswith("Index update needed")
+    assert stale[1] == "Update index"
+    assert current == ("Index current", "Index current", True)
+
+
+def test_translation_saves_separate_page_aware_markdown(tmp_path: Path):
+    from osint_local.translation import translate_document
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "manual.txt"
+    source.write_text("English FPV report for translation.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    progress = []
+    try:
+        processed = pipeline.process_file(source)
+        assert processed.status == "processed"
+        result = translate_document(
+            settings,
+            pipeline.db,
+            processed.sha256,
+            source_lang="en",
+            target_lang="ru",
+            translator=lambda text, src, dst: "ПЕРЕВОД: " + text,
+            progress=lambda current, total, message: progress.append((current, total, message)),
+        )
+        output = Path(result["output_path"])
+        assert output.is_file()
+        assert output.parent == settings.translations_dir / "ru"
+        assert output != source
+        assert "ПЕРЕВОД:" in output.read_text(encoding="utf-8")
+        rows = pipeline.db.list_translations(processed.sha256)
+        assert rows[0]["target_lang"] == "ru"
+        assert progress[-1][0] == progress[-1][1]
+    finally:
+        pipeline.close()
+
+
+def test_translation_default_folder_is_sibling_of_input(tmp_path: Path):
+    settings = load_settings(make_config(tmp_path))
+    assert settings.translations_dir == settings.input_dir.parent / "translations"

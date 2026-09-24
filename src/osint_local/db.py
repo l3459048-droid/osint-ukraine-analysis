@@ -55,6 +55,18 @@ CREATE TABLE IF NOT EXISTS embeddings (
     FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
+CREATE TABLE IF NOT EXISTS translations (
+    document_sha256 TEXT NOT NULL,
+    source_lang TEXT NOT NULL,
+    target_lang TEXT NOT NULL,
+    output_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    engine TEXT NOT NULL,
+    PRIMARY KEY (document_sha256, source_lang, target_lang),
+    FOREIGN KEY(document_sha256) REFERENCES documents(sha256) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_translations_document ON translations(document_sha256);
+
 """
 
 
@@ -324,6 +336,31 @@ class Database:
             }
             for row in rows
         ]
+
+    def save_translation(self, *, sha256: str, source_lang: str, target_lang: str, output_path: str, created_at: str, engine: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO translations(document_sha256, source_lang, target_lang, output_path, created_at, engine)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(document_sha256, source_lang, target_lang) DO UPDATE SET
+                     output_path=excluded.output_path, created_at=excluded.created_at, engine=excluded.engine""",
+                (sha256, source_lang, target_lang, output_path, created_at, engine),
+            )
+            self.conn.commit()
+
+    def list_translations(self, sha256: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                "SELECT * FROM translations WHERE document_sha256=? ORDER BY created_at DESC", (sha256,)
+            ).fetchall()
+
+    def get_translation(self, sha256: str, source_lang: str, target_lang: str):
+        with self._lock:
+            return self.conn.execute(
+                """SELECT * FROM translations
+                   WHERE document_sha256=? AND source_lang=? AND target_lang=?""",
+                (sha256, source_lang, target_lang),
+            ).fetchone()
 
     def stats(self) -> dict[str, Any]:
         with self._lock:

@@ -1,7 +1,12 @@
 {
   "input_dir": "inbox",
   "workspace_dir": "workspace",
-  "allowed_extensions": [".pdf", ".docx", ".txt", ".md"],
+  "allowed_extensions": [
+    ".pdf",
+    ".docx",
+    ".txt",
+    ".md"
+  ],
   "ocr": {
     "enabled": true,
     "languages": "eng+rus+ukr",
@@ -11,12 +16,63 @@
   "classification": {
     "min_score": 1,
     "domains": {
-      "Drones": ["drone", "uav", "uas", "fpv", "бпла", "дрон", "безпілот"],
-      "Electronic Warfare": ["electronic warfare", "ew", "jamming", "jammer", "radar", "рэб", "реб", "глуш"],
-      "Artillery": ["artillery", "howitzer", "himars", "mortar", "артилл", "гаубиц", "миномет", "міномет"],
-      "Air Defense": ["air defense", "sam", "patriot", "nasams", "пво", "зенит", "протиповітр"],
-      "Logistics": ["logistics", "supply", "transport", "maintenance", "логист", "снабж", "постач", "ремонт"],
-      "Combat Medicine": ["medic", "medevac", "casualty", "first aid", "эвакуац", "медик", "евакуац"]
+      "Drones": [
+        "drone",
+        "uav",
+        "uas",
+        "fpv",
+        "бпла",
+        "дрон",
+        "безпілот"
+      ],
+      "Electronic Warfare": [
+        "electronic warfare",
+        "ew",
+        "jamming",
+        "jammer",
+        "radar",
+        "рэб",
+        "реб",
+        "глуш"
+      ],
+      "Artillery": [
+        "artillery",
+        "howitzer",
+        "himars",
+        "mortar",
+        "артилл",
+        "гаубиц",
+        "миномет",
+        "міномет"
+      ],
+      "Air Defense": [
+        "air defense",
+        "sam",
+        "patriot",
+        "nasams",
+        "пво",
+        "зенит",
+        "протиповітр"
+      ],
+      "Logistics": [
+        "logistics",
+        "supply",
+        "transport",
+        "maintenance",
+        "логист",
+        "снабж",
+        "постач",
+        "ремонт"
+      ],
+      "Combat Medicine": [
+        "medic",
+        "medevac",
+        "casualty",
+        "first aid",
+        "эвакуац",
+        "медик",
+        "евакуац"
+      ]
     }
   },
   "search": {
@@ -32,5 +88,16 @@
     "host": "127.0.0.1",
     "port": 8080,
     "open_browser": true
+  },
+  "ui": {
+    "setup_complete": true
+  },
+  "translation": {
+    "enabled": true,
+    "output_dir": "auto",
+    "default_source": "auto",
+    "default_target": "ru",
+    "max_chars_per_request": 1800,
+    "auto_install_models": true
   }
 }

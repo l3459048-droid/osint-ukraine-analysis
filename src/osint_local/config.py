@@ -49,16 +49,28 @@ DEFAULT_CONFIG = {
         "batch_size": 32,
         "auto_embed": False,
     },
+    "translation": {
+        "enabled": True,
+        "output_dir": "auto",
+        "default_source": "auto",
+        "default_target": "ru",
+        "max_chars_per_request": 1800,
+        "auto_install_models": True,
+    },
     "web": {
         "host": "127.0.0.1",
         "port": 8080,
         "open_browser": True,
+    },
+    "ui": {
+        "setup_complete": True,
     },
 }
 
 
 @dataclass(frozen=True)
 class Settings:
+    config_path: Path
     project_root: Path
     input_dir: Path
     workspace_dir: Path
@@ -66,7 +78,9 @@ class Settings:
     ocr: dict[str, Any]
     classification: dict[str, Any]
     search: dict[str, Any]
+    translation: dict[str, Any]
     web: dict[str, Any]
+    ui: dict[str, Any]
 
     @property
     def db_path(self) -> Path:
@@ -84,6 +98,13 @@ class Settings:
     def logs_dir(self) -> Path:
         return self.workspace_dir / "logs"
 
+    @property
+    def translations_dir(self) -> Path:
+        value = str(self.translation.get("output_dir", "auto"))
+        if value.strip().casefold() == "auto":
+            return (self.input_dir.parent / "translations").resolve()
+        return _resolve(self.project_root, value)
+
 
 def load_settings(config_path: str | Path = "config.json") -> Settings:
     config_path = Path(config_path).expanduser().resolve()
@@ -94,6 +115,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         _deep_update(data, user)
 
     return Settings(
+        config_path=config_path,
         project_root=root,
         input_dir=_resolve(root, data["input_dir"]),
         workspace_dir=_resolve(root, data["workspace_dir"]),
@@ -101,7 +123,9 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         ocr=data["ocr"],
         classification=data["classification"],
         search=data["search"],
+        translation=data["translation"],
         web=data["web"],
+        ui=data["ui"],
     )
 
 
@@ -109,8 +133,27 @@ def write_default_config(path: str | Path) -> Path:
     path = Path(path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_json(path, DEFAULT_CONFIG)
     return path
+
+
+def update_config(path: str | Path, patch: dict[str, Any]) -> Path:
+    """Merge a small runtime/UI patch without discarding user configuration."""
+    path = Path(path).expanduser().resolve()
+    data = json.loads(json.dumps(DEFAULT_CONFIG))
+    if path.exists():
+        current = json.loads(path.read_text(encoding="utf-8"))
+        _deep_update(data, current)
+    _deep_update(data, patch)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(path, data)
+    return path
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def _resolve(root: Path, value: str) -> Path:

@@ -8,9 +8,10 @@ import shutil
 from dataclasses import asdict
 from pathlib import Path
 
-from .config import load_settings, write_default_config
+from .config import load_settings, update_config, write_default_config
 from .pipeline import LocalPipeline
 from .search import build_embeddings, search_chunks
+from .translation import argos_available, installed_pairs, translate_document
 
 
 def configure_logging(log_dir: Path | None = None, verbose: bool = False) -> None:
@@ -47,6 +48,11 @@ def main() -> int:
     search.add_argument("--mode", choices=["auto", "semantic", "lexical"], default="auto")
     search.add_argument("--json", action="store_true", dest="as_json")
 
+    translate_cmd = sub.add_parser("translate", help="Translate one processed document offline")
+    translate_cmd.add_argument("sha256")
+    translate_cmd.add_argument("--from", dest="source_lang", choices=["auto", "en", "ru", "uk"], default="auto")
+    translate_cmd.add_argument("--to", dest="target_lang", choices=["en", "ru", "uk"], required=True)
+
     serve_cmd = sub.add_parser("serve", help="Run the local Web UI")
     serve_cmd.add_argument("--host", default=None, help="Bind address (default from config)")
     serve_cmd.add_argument("--port", type=int, default=None, help="Port (default from config)")
@@ -65,6 +71,10 @@ def main() -> int:
         print(f"Input:  {settings.input_dir}")
         print(f"Data:   {settings.workspace_dir}")
         return 0
+
+    if args.command == "serve" and not config_path.exists():
+        write_default_config(config_path)
+        update_config(config_path, {"ui": {"setup_complete": False}})
 
     settings = load_settings(config_path)
     configure_logging(settings.logs_dir, args.verbose)
@@ -116,6 +126,18 @@ def main() -> int:
                 _print_hits(hits)
             return 0
 
+        if args.command == "translate":
+            try:
+                result = translate_document(
+                    settings, pipeline.db, args.sha256,
+                    source_lang=args.source_lang, target_lang=args.target_lang,
+                )
+            except RuntimeError as exc:
+                print(str(exc))
+                return 2
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
         if args.command == "serve":
             from .web import serve
 
@@ -141,6 +163,9 @@ def main() -> int:
                 "indexed_chunks": pipeline.db.chunk_count(),
                 "web_host": str(settings.web.get("host", "127.0.0.1")),
                 "web_port": int(settings.web.get("port", 8080)),
+                "argos_translate_installed": argos_available(),
+                "translation_pairs": [f"{a}->{b}" for a, b in sorted(installed_pairs())] if argos_available() else [],
+                "translations_dir": str(settings.translations_dir),
             }
             print(json.dumps(info, ensure_ascii=False, indent=2))
             return 0 if info["workspace_writable"] else 1
