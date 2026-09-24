@@ -683,14 +683,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.server.background.interval_seconds = max(
                 15, int(settings.background.get("interval_seconds", 60))
             )
-        self._action_response(
-            {
-                "ok": True,
-                "profile": profile,
-                "label": PERFORMANCE_PROFILES[profile]["label"],
-            },
-            status=HTTPStatus.OK,
-        )
+        payload = {
+            "ok": True,
+            "profile": profile,
+            "label": PERFORMANCE_PROFILES[profile]["label"],
+        }
+        if self.headers.get("X-Requested-With") == "fetch":
+            self._json(payload, status=HTTPStatus.OK)
+            return
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/settings")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _set_input_dir_action(self) -> None:
         data = self._form_data()
