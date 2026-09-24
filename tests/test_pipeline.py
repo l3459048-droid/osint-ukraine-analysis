@@ -1012,3 +1012,108 @@ def test_v08_web_can_switch_profile_and_render_system_status(tmp_path: Path, mon
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+def test_qa_compare_mode_diversifies_document_sources(tmp_path: Path, monkeypatch):
+    import osint_local.qa as qa
+    from osint_local.search import SearchHit
+
+    hits = [
+        SearchHit(1.0, "hybrid", "a" * 64, "a.txt", 1, 0, "Alpha one."),
+        SearchHit(0.9, "hybrid", "a" * 64, "a.txt", 2, 1, "Alpha two."),
+        SearchHit(0.8, "hybrid", "a" * 64, "a.txt", 3, 2, "Alpha three."),
+        SearchHit(0.7, "hybrid", "b" * 64, "b.txt", 1, 0, "Beta one."),
+        SearchHit(0.6, "hybrid", "c" * 64, "c.txt", 1, 0, "Gamma one."),
+    ]
+    monkeypatch.setattr(qa, "search_chunks", lambda *args, **kwargs: hits)
+
+    class DummyDB:
+        pass
+
+    captured = {}
+
+    def fake_chat(base_url, model, messages):
+        captured["messages"] = messages
+        return "Comparison [1] [3]."
+
+    result = qa.ask_documents(
+        DummyDB(),
+        "Compare the reports",
+        {},
+        {
+            "base_url": "http://127.0.0.1:11434",
+            "model": "fake-local",
+            "top_k": 3,
+            "max_context_chars": 12000,
+        },
+        analysis_mode="compare",
+        chat_client=fake_chat,
+    )
+    assert result.mode == "compare"
+    assert len({hit.document_sha256 for hit in result.sources}) >= 3
+    assert "Сравни сведения" in captured["messages"][0]["content"]
+
+
+def test_qa_contradictions_mode_uses_cautious_instruction(tmp_path: Path, monkeypatch):
+    import osint_local.qa as qa
+    from osint_local.search import SearchHit
+
+    monkeypatch.setattr(
+        qa,
+        "search_chunks",
+        lambda *args, **kwargs: [
+            SearchHit(1.0, "hybrid", "a" * 64, "a.txt", 1, 0, "Claim A."),
+            SearchHit(0.9, "hybrid", "b" * 64, "b.txt", 1, 0, "Claim B."),
+        ],
+    )
+
+    captured = {}
+
+    def fake_chat(base_url, model, messages):
+        captured["system"] = messages[0]["content"]
+        return "No clear contradiction."
+
+    result = qa.ask_documents(
+        object(),
+        "Есть ли противоречия?",
+        {},
+        {
+            "base_url": "http://127.0.0.1:11434",
+            "model": "fake-local",
+            "top_k": 5,
+            "max_context_chars": 8000,
+        },
+        analysis_mode="contradictions",
+        chat_client=fake_chat,
+    )
+    assert result.mode == "contradictions"
+    assert "Не называй обычные различия формулировок противоречием" in captured["system"]
+
+
+def test_web_ask_page_exposes_analysis_modes(tmp_path: Path):
+    import urllib.request
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/ask", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert 'value="quick"' in body
+        assert 'value="deep"' in body
+        assert 'value="compare"' in body
+        assert 'value="contradictions"' in body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
