@@ -21,7 +21,7 @@ from .background import BackgroundLoop
 from .chat import chat_local
 from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
-from .fast_translation import fast_ready_pairs, fast_translation_available
+from .fast_translation import fast_ready_pairs, fast_translation_available, prepare_fast_model
 from .pipeline import LocalPipeline
 from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
@@ -308,6 +308,100 @@ class ChatManager:
             )
 
 
+
+class FastSetupManager:
+    """Prepare Fast Translation models independently from library maintenance."""
+
+    def __init__(self, pipeline: LocalPipeline, gate: InteractiveGate | None = None) -> None:
+        self.pipeline = pipeline
+        self.gate = gate
+        self._lock = threading.RLock()
+        self._state = {
+            "kind": "translation-setup",
+            "status": "idle",
+            "source_lang": "",
+            "target_lang": "ru",
+            "current": 0,
+            "total": 0,
+            "message": "Ready",
+            "error": "",
+            "result": None,
+        }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._state)
+
+    def start(self, source_lang: str) -> dict:
+        source_lang = str(source_lang or "").strip().casefold()
+        if source_lang not in {"en", "uk"}:
+            raise ValueError("Fast Translation supports en→ru and uk→ru")
+        with self._lock:
+            if self._state.get("status") == "running":
+                raise ActionBusyError("Fast Translation setup is already running")
+            self._state = {
+                "kind": "translation-setup",
+                "status": "running",
+                "source_lang": source_lang,
+                "target_lang": "ru",
+                "current": 0,
+                "total": 0,
+                "message": f"Preparing Fast Translation {source_lang}→ru…",
+                "error": "",
+                "result": None,
+            }
+            initial = dict(self._state)
+            if self.gate is not None:
+                self.gate.acquire()
+            threading.Thread(
+                target=self._worker_guarded,
+                args=(source_lang,),
+                name=f"osint-local-fast-setup-{source_lang}",
+                daemon=True,
+            ).start()
+            return initial
+
+    def _progress(self, current: int, total: int, message: str) -> None:
+        with self._lock:
+            if self._state.get("status") == "running":
+                self._state["current"] = max(0, int(current))
+                self._state["total"] = max(0, int(total))
+                self._state["message"] = str(message)
+
+    def _worker_guarded(self, source_lang: str) -> None:
+        try:
+            self._worker(source_lang)
+        finally:
+            if self.gate is not None:
+                self.gate.release()
+
+    def _worker(self, source_lang: str) -> None:
+        try:
+            result = prepare_fast_model(
+                self.pipeline.settings,
+                source_lang,
+                "ru",
+                progress=self._progress,
+                run_benchmark=True,
+            )
+        except Exception as exc:
+            with self._lock:
+                self._state.update(
+                    status="failed",
+                    message="Fast Translation setup failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                    result=None,
+                )
+            return
+        with self._lock:
+            self._state.update(
+                status="succeeded",
+                message="Fast Translation ready",
+                error="",
+                result=result,
+            )
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -319,6 +413,7 @@ class DashboardServer(ThreadingHTTPServer):
         self.actions = ActionManager(pipeline, interactive_busy=self.interactive.active)
         self.ask = AskManager(pipeline, self.interactive)
         self.chat = ChatManager(pipeline, self.interactive)
+        self.fast_setup = FastSetupManager(pipeline, self.interactive)
         self.csrf_token = secrets.token_urlsafe(32)
         self.folder_opener = folder_opener
         self.folder_picker = folder_picker
@@ -729,11 +824,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "performance_profile": profile,
             "performance_label": profile_info.get("label", profile.title()),
             "action": self.server.actions.snapshot(),
+            "fast_setup": self.server.fast_setup.snapshot(),
         }
 
     def _activity_payload(self) -> dict:
         return {
             "action": self.server.actions.snapshot(),
+            "fast_setup": self.server.fast_setup.snapshot(),
             "stats": self._stats_payload(),
             "errors": self.db.recent_errors(limit=6),
         }
@@ -973,11 +1070,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            action = self.server.actions.start_prepare_translation(source_lang)
+            setup = self.server.fast_setup.start(source_lang)
         except (ActionBusyError, ValueError) as exc:
             self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
-        self._action_response({"action": action}, status=HTTPStatus.ACCEPTED)
+        self._action_response({"action": setup, "fast_setup": setup}, status=HTTPStatus.ACCEPTED)
 
     def _set_performance_action(self) -> None:
         data = self._form_data()
