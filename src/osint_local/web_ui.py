@@ -518,6 +518,7 @@ UI_SCRIPT = r"""
     const askButton = askForm.querySelector('button[type="submit"]');
     let askRunning = false;
     let lastQuestion = '';
+    let lastMode = '';
 
     function renderAsk(state) {
       const status = state.status || 'idle';
@@ -558,7 +559,8 @@ UI_SCRIPT = r"""
         const response = await fetch('/api/ask-status', {cache: 'no-store'});
         if (response.ok) {
           const state = await response.json();
-          if (!lastQuestion || state.question === lastQuestion || state.status === 'running') {
+          const sameRequest = state.question === lastQuestion && (!lastMode || state.mode === lastMode);
+          if (!lastQuestion || sameRequest || state.status === 'running') {
             renderAsk(state);
           }
         }
@@ -570,6 +572,8 @@ UI_SCRIPT = r"""
       event.preventDefault();
       const question = (askForm.querySelector('textarea[name="q"]') || {}).value || '';
       lastQuestion = question.trim();
+      const modeSelect = askForm.querySelector('select[name="mode"]');
+      lastMode = modeSelect ? modeSelect.value : 'quick';
       if (!lastQuestion) return;
       if (askResults) askResults.innerHTML = '';
       if (askStatus) {
