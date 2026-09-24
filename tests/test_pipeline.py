@@ -1117,3 +1117,209 @@ def test_web_ask_page_exposes_analysis_modes(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+def test_language_is_backfilled_for_existing_documents(tmp_path: Path):
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "legacy.txt"
+    source.write_text("English legacy FPV report.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(source)
+        pipeline.db.conn.execute(
+            "UPDATE documents SET language=NULL WHERE sha256=?",
+            (processed.sha256,),
+        )
+        pipeline.db.conn.commit()
+    finally:
+        pipeline.close()
+
+    reopened = LocalPipeline(settings)
+    try:
+        row = reopened.db.get_document(processed.sha256)
+        assert row["language"] == "en"
+    finally:
+        reopened.close()
+
+
+def test_general_chat_is_separate_from_document_retrieval(monkeypatch):
+    import osint_local.chat as chat
+
+    captured = {}
+
+    def fake_ollama(base_url, model, messages, qa_config):
+        captured["messages"] = messages
+        return "Обычный локальный ответ."
+
+    monkeypatch.setattr(chat, "_ollama_chat", fake_ollama)
+    result = chat.chat_local(
+        "Расскажи про Python",
+        [{"role": "user", "content": "Привет"}, {"role": "assistant", "content": "Здравствуйте"}],
+        {"base_url": "http://127.0.0.1:11434", "model": "fake-local"},
+    )
+    assert result.answer == "Обычный локальный ответ."
+    assert result.model == "fake-local"
+    system = captured["messages"][0]["content"]
+    assert "нет доступа к библиотеке документов" in system
+    assert "нет доступа" in system
+    assert captured["messages"][-1]["content"] == "Расскажи про Python"
+
+
+def test_web_chat_keeps_and_clears_history(tmp_path: Path, monkeypatch):
+    import re
+    import time
+    import urllib.parse
+    import urllib.request
+
+    import osint_local.web as web
+    from osint_local.chat import ChatResult
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        monkeypatch.setattr(
+            web,
+            "chat_local",
+            lambda message, history, qa_config: ChatResult(
+                answer="Ответ на: " + message,
+                model="fake-local",
+            ),
+        )
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/chat", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "does not search documents" in body
+        match = re.search(r'name="csrf" value="([^"]+)"', body)
+        assert match
+        csrf = match.group(1)
+
+        req = urllib.request.Request(
+            base + "/api/chat",
+            data=urllib.parse.urlencode({"csrf": csrf, "message": "Привет"}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            assert response.status == 202
+
+        deadline = time.time() + 5
+        state = {"status": "running"}
+        while state["status"] == "running" and time.time() < deadline:
+            with urllib.request.urlopen(base + "/api/chat-status", timeout=5) as response:
+                state = json.loads(response.read().decode("utf-8"))
+            time.sleep(0.02)
+
+        assert state["status"] == "succeeded"
+        assert "Привет" in state["html"]
+        assert "Ответ на: Привет" in state["html"]
+        assert len(state["history"]) == 2
+
+        req = urllib.request.Request(
+            base + "/api/chat-clear",
+            data=urllib.parse.urlencode({"csrf": csrf}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            cleared = json.loads(response.read().decode("utf-8"))
+        assert cleared["history"] == []
+        assert cleared["status"] == "idle"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
+
+
+def test_web_ask_filters_are_passed_to_retrieval(tmp_path: Path, monkeypatch):
+    import re
+    import time
+    import urllib.parse
+    import urllib.request
+
+    import osint_local.web as web
+    from osint_local.qa import QAResult
+    from osint_local.search import SearchHit
+
+    settings = load_settings(make_config(tmp_path))
+    (settings.input_dir / "reports").mkdir(parents=True)
+    source = settings.input_dir / "reports" / "english.txt"
+    source.write_text("FPV English report.", encoding="utf-8")
+    pipeline = LocalPipeline(settings)
+    pipeline.scan()
+    doc = pipeline.db.list_documents(limit=10)[0]
+    captured = {}
+    server = None
+    thread = None
+
+    def fake_ask(db, question, search_config, qa_config, *, analysis_mode="quick", filters=None, progress=None, **kwargs):
+        captured["filters"] = filters or {}
+        if progress:
+            progress("done")
+        hit = SearchHit(1.0, "lexical", doc["sha256"], doc["source_path"], 1, 0, "FPV English report.")
+        return QAResult(question, "Filtered answer [1].", "fake-local", [hit], analysis_mode)
+
+    try:
+        monkeypatch.setattr(web, "ask_documents", fake_ask)
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/ask", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "Last 30 days" in body
+        assert "Specific documents" in body
+        assert "English" in body
+        match = re.search(r'name="csrf" value="([^"]+)"', body)
+        assert match
+
+        payload = {
+            "csrf": match.group(1),
+            "q": "FPV?",
+            "mode": "quick",
+            "period": "30",
+            "domain": "Drones",
+            "folder": "reports",
+            "language": "en",
+            "documents": doc["sha256"],
+        }
+        req = urllib.request.Request(
+            base + "/api/ask",
+            data=urllib.parse.urlencode(payload).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            assert response.status == 202
+
+        deadline = time.time() + 5
+        while "filters" not in captured and time.time() < deadline:
+            time.sleep(0.02)
+
+        filters = captured["filters"]
+        assert filters["domain"] == "Drones"
+        assert filters["source_prefix"] == "reports"
+        assert filters["language"] == "en"
+        assert filters["document_sha256s"] == [doc["sha256"]]
+        assert isinstance(filters["date_from_ns"], int)
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
