@@ -34,10 +34,13 @@ def ask_documents(
     qa_config: dict,
     *,
     chat_client: Callable[[str, str, list[dict[str, str]]], str] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> QAResult:
     question = question.strip()
     if not question:
         raise RuntimeError("Question is empty")
+    if progress:
+        progress("searching")
     top_k = max(1, min(20, int(qa_config.get("top_k", 8))))
     hits = search_chunks(db, question, search_config, limit=top_k, mode="auto")
     if not hits:
@@ -72,12 +75,16 @@ def ask_documents(
     )
     user = f"Вопрос:\n{question}\n\nФрагменты документов:\n" + "\n".join(context_parts)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    if progress:
+        progress("generating")
     if chat_client is not None:
         answer = chat_client(base_url, model, messages).strip()
     else:
         answer = _ollama_chat(base_url, model, messages, qa_config).strip()
     if not answer:
         raise RuntimeError("The local model returned an empty answer")
+    if progress:
+        progress("done")
     return QAResult(question, answer, model, selected)
 
 
