@@ -1215,7 +1215,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not file_path.is_file():
             self._error(HTTPStatus.NOT_FOUND, "Translation file is missing")
             return
-        self._send_file(file_path, head_only=False)
+        self._send_file(
+            file_path,
+            head_only=False,
+            content_type_override="text/markdown; charset=utf-8",
+        )
 
     def _source(self, sha256: str, *, head_only: bool) -> None:
         if not SHA_RE.fullmatch(sha256):
@@ -1236,9 +1240,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._send_file(path, head_only=head_only)
 
-    def _send_file(self, path: Path, *, head_only: bool) -> None:
+    def _send_file(
+        self,
+        path: Path,
+        *,
+        head_only: bool,
+        content_type_override: str | None = None,
+    ) -> None:
         size = path.stat().st_size
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        content_type = content_type_override or (
+            mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        )
         start, end = 0, max(0, size - 1)
         status = HTTPStatus.OK
         range_header = self.headers.get("Range")
