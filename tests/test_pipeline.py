@@ -728,7 +728,7 @@ def test_qa_uses_retrieved_document_sources_with_local_client(tmp_path: Path):
         assert result.sources[0].source_path == "qa.txt"
         assert captured["model"] == "fake-local"
         assert "qa.txt" in captured["messages"][1]["content"]
-        assert progress_events == ["searching", "generating", "done"]
+        assert progress_events == ["searching", "reviewing", "generating", "done"]
     finally:
         pipeline.close()
 
