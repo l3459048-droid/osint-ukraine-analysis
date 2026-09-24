@@ -173,7 +173,16 @@ class FastTranslator:
         self.model_dir = fast_model_dir(settings, source_lang, target_lang)
         self.inter_threads, self.intra_threads = choose_threading(settings)
         self.compute_type = str(settings.translation.get("fast_compute_type") or "int8")
-        self.batch_tokens = max(256, int(settings.translation.get("fast_batch_tokens", 3072)))
+        configured_batch = int(settings.translation.get("fast_batch_tokens", 0) or 0)
+        benchmark = load_fast_benchmark(settings, source_lang, target_lang)
+        recommended_batch = int((benchmark or {}).get("recommended_batch_tokens") or 0)
+        if configured_batch > 0:
+            self.batch_tokens = max(256, configured_batch)
+        elif recommended_batch > 0:
+            self.batch_tokens = max(256, recommended_batch)
+        else:
+            profile = str(settings.performance.get("profile") or "economy").casefold()
+            self.batch_tokens = 4096 if profile == "balanced" else 2048
         self.max_input_tokens = max(64, min(512, int(settings.translation.get("fast_max_input_tokens", 220))))
         self.translator = ctranslate2.Translator(
             str(self.model_dir),
@@ -323,13 +332,30 @@ def benchmark_fast_translation(settings, source_lang: str, target_lang: str = "r
         )
     texts = [sample for _ in range(32)]
     engine.translate_texts(texts[:4])
-    started = time.perf_counter()
-    engine.translate_texts(texts)
-    elapsed = max(0.001, time.perf_counter() - started)
+
+    candidates = [1024, 2048, 4096]
+    measurements: list[dict] = []
+    best_batch = engine.batch_tokens
+    best_chars_per_second = 0.0
     chars = sum(len(value) for value in texts)
-    chars_per_second = chars / elapsed
+
+    for batch_tokens in candidates:
+        engine.batch_tokens = batch_tokens
+        started = time.perf_counter()
+        engine.translate_texts(texts)
+        elapsed = max(0.001, time.perf_counter() - started)
+        chars_per_second = chars / elapsed
+        measurements.append({
+            "batch_tokens": batch_tokens,
+            "chars_per_second": round(chars_per_second, 1),
+            "elapsed_seconds": round(elapsed, 3),
+        })
+        if chars_per_second > best_chars_per_second:
+            best_chars_per_second = chars_per_second
+            best_batch = batch_tokens
+
     assumed_chars_per_page = max(800, int(settings.translation.get("benchmark_chars_per_page", 1800)))
-    pages_per_minute = chars_per_second * 60.0 / assumed_chars_per_page
+    pages_per_minute = best_chars_per_second * 60.0 / assumed_chars_per_page
     result = {
         "source_lang": source_lang,
         "target_lang": target_lang,
@@ -337,8 +363,9 @@ def benchmark_fast_translation(settings, source_lang: str, target_lang: str = "r
         "compute_type": engine.compute_type,
         "inter_threads": engine.inter_threads,
         "intra_threads": engine.intra_threads,
-        "batch_tokens": engine.batch_tokens,
-        "chars_per_second": round(chars_per_second, 1),
+        "recommended_batch_tokens": best_batch,
+        "measurements": measurements,
+        "chars_per_second": round(best_chars_per_second, 1),
         "estimated_pages_per_minute": round(pages_per_minute, 1),
         "estimated_100_pages_minutes": round(100.0 / pages_per_minute, 1) if pages_per_minute > 0 else None,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -347,7 +374,6 @@ def benchmark_fast_translation(settings, source_lang: str, target_lang: str = "r
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_json(path, result)
     return result
-
 
 def load_fast_benchmark(settings, source_lang: str, target_lang: str = "ru") -> dict | None:
     path = _benchmark_path(settings, source_lang, target_lang)
