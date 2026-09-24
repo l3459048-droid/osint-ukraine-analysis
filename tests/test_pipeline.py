@@ -1582,3 +1582,53 @@ def test_fast_translation_setup_can_start_while_maintenance_is_running(tmp_path:
         if server is not None:
             server.server_close()
         pipeline.close()
+
+
+def test_translation_http_response_declares_utf8_and_preserves_cyrillic(tmp_path: Path):
+    import threading
+    import urllib.request
+
+    from osint_local.translation import translate_document
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "ukrainian.txt"
+    source.write_text("Тестовий український документ.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        processed = pipeline.process_file(source)
+        result = translate_document(
+            settings,
+            pipeline.db,
+            processed.sha256,
+            source_lang="uk",
+            target_lang="ru",
+            translator=lambda text, src, dst: "Русский перевод — проверка кодировки",
+        )
+        assert Path(result["output_path"]).read_text(encoding="utf-8").startswith("# Translation —")
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        url = f"http://127.0.0.1:{port}/translation/{processed.sha256}/uk/ru"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            assert response.headers.get_content_type() == "text/markdown"
+            assert response.headers.get_content_charset() == "utf-8"
+            body = response.read().decode("utf-8")
+        assert "Translation —" in body
+        assert "Русский перевод — проверка кодировки" in body
+        assert "â€”" not in body
+        assert "Ð" not in body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
