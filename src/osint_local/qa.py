@@ -72,6 +72,7 @@ def ask_documents(
     qa_config: dict,
     *,
     analysis_mode: str = "quick",
+    filters: dict | None = None,
     chat_client: Callable[[str, str, list[dict[str, str]]], str] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> QAResult:
@@ -97,8 +98,11 @@ def ask_documents(
         search_config,
         limit=candidate_limit,
         mode="auto",
+        filters=filters,
     )
     if not hits:
+        if filters:
+            raise RuntimeError("No relevant document fragments matched the selected Ask filters")
         raise RuntimeError("No relevant document fragments were found")
 
     if progress:
