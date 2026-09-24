@@ -166,10 +166,13 @@ def _translation_panel(csrf_token: str, sha256: str, translations, *, available:
 </section>"""
 
 
-def _ask_form(question: str) -> str:
-    return f"""<form class="ask-form" action="/ask" method="get">
+def _ask_form(question: str, csrf_token: str = "") -> str:
+    return f"""<form class="ask-form" action="/api/ask" method="post" data-ask-form>
+<input type="hidden" name="csrf" value="{_e(csrf_token)}">
 <textarea name="q" rows="3" placeholder="Ask across all documents…">{_e(question)}</textarea>
-<button type="submit">Ask</button></form>"""
+<button type="submit">Ask</button></form>
+<div class="ask-status" data-ask-status hidden></div>
+<div class="ask-results" data-ask-results></div>"""
 
 
 def _qa_answer(result, error: str = "", fallback_hits=None) -> str:
@@ -430,6 +433,96 @@ UI_SCRIPT = r"""
       }
     });
     pollTranslation();
+  }
+
+  const askForm = document.querySelector('[data-ask-form]');
+  if (askForm) {
+    const askStatus = document.querySelector('[data-ask-status]');
+    const askResults = document.querySelector('[data-ask-results]');
+    const askButton = askForm.querySelector('button[type="submit"]');
+    let askRunning = false;
+    let lastQuestion = '';
+
+    function renderAsk(state) {
+      const status = state.status || 'idle';
+      askRunning = status === 'running';
+      if (askButton) askButton.disabled = askRunning;
+
+      if (askRunning) {
+        if (askStatus) {
+          askStatus.hidden = false;
+          askStatus.classList.remove('action-error');
+          askStatus.textContent = state.message || 'Обрабатываю вопрос…';
+        }
+        return;
+      }
+
+      if (status === 'succeeded') {
+        if (askStatus) {
+          askStatus.hidden = false;
+          askStatus.classList.remove('action-error');
+          askStatus.textContent = state.message || 'Готово';
+        }
+        if (askResults && state.html) askResults.innerHTML = state.html;
+        return;
+      }
+
+      if (status === 'failed') {
+        if (askStatus) {
+          askStatus.hidden = false;
+          askStatus.classList.add('action-error');
+          askStatus.textContent = state.message || state.error || 'Не удалось получить ответ';
+        }
+        if (askResults && state.html) askResults.innerHTML = state.html;
+      }
+    }
+
+    async function pollAsk() {
+      try {
+        const response = await fetch('/api/ask-status', {cache: 'no-store'});
+        if (response.ok) {
+          const state = await response.json();
+          if (!lastQuestion || state.question === lastQuestion || state.status === 'running') {
+            renderAsk(state);
+          }
+        }
+      } catch (_) {}
+      setTimeout(pollAsk, askRunning ? 700 : 2500);
+    }
+
+    askForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const question = (askForm.querySelector('textarea[name="q"]') || {}).value || '';
+      lastQuestion = question.trim();
+      if (!lastQuestion) return;
+      if (askResults) askResults.innerHTML = '';
+      if (askStatus) {
+        askStatus.hidden = false;
+        askStatus.classList.remove('action-error');
+        askStatus.textContent = 'Запускаю локальный анализ…';
+      }
+      if (askButton) askButton.disabled = true;
+      try {
+        const response = await fetch(askForm.action, {
+          method: 'POST',
+          body: new URLSearchParams(new FormData(askForm)),
+          headers: {'X-Requested-With': 'fetch'},
+        });
+        const state = await response.json();
+        if (!response.ok) throw new Error(state.error || 'Ask failed');
+        renderAsk(state);
+      } catch (error) {
+        askRunning = false;
+        if (askButton) askButton.disabled = false;
+        if (askStatus) {
+          askStatus.hidden = false;
+          askStatus.classList.add('action-error');
+          askStatus.textContent = error.message || 'Ask failed';
+        }
+      }
+    });
+
+    pollAsk();
   }
 
   const panel = document.querySelector('[data-action-panel]');
