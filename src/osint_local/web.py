@@ -55,6 +55,108 @@ LOG = logging.getLogger("osint_local.web")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+class AskManager:
+    """Run one local Q&A job in the background so the browser request stays short."""
+
+    def __init__(self, pipeline: LocalPipeline) -> None:
+        self.pipeline = pipeline
+        self._lock = threading.RLock()
+        self._state = {
+            "status": "idle",
+            "question": "",
+            "message": "Ready",
+            "html": "",
+            "error": "",
+            "model": "",
+        }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._state)
+
+    def start(self, question: str) -> dict:
+        question = question.strip()
+        if not question:
+            raise ValueError("Question is empty")
+        with self._lock:
+            if self._state.get("status") == "running":
+                raise ActionBusyError("A question is already being processed")
+            self._state = {
+                "status": "running",
+                "question": question,
+                "message": "Ищу релевантные фрагменты…",
+                "html": "",
+                "error": "",
+                "model": "",
+            }
+            threading.Thread(
+                target=self._worker,
+                args=(question,),
+                name="osint-local-ask",
+                daemon=True,
+            ).start()
+            return dict(self._state)
+
+    def _progress(self, stage: str) -> None:
+        messages = {
+            "searching": "Ищу релевантные фрагменты…",
+            "generating": "Ollama формирует ответ…",
+            "done": "Готово",
+        }
+        with self._lock:
+            if self._state.get("status") == "running":
+                self._state["message"] = messages.get(stage, stage)
+
+    def _worker(self, question: str) -> None:
+        try:
+            result = ask_documents(
+                self.pipeline.db,
+                question,
+                self.pipeline.settings.search,
+                self.pipeline.settings.qa,
+                progress=self._progress,
+            )
+        except RuntimeError as exc:
+            fallback = []
+            try:
+                fallback = search_chunks(
+                    self.pipeline.db,
+                    question,
+                    self.pipeline.settings.search,
+                    limit=int(self.pipeline.settings.qa.get("top_k", 8)),
+                    mode="auto",
+                )
+            except RuntimeError:
+                fallback = []
+            with self._lock:
+                self._state.update(
+                    status="failed",
+                    message="Не удалось получить ответ",
+                    error=str(exc),
+                    html=_qa_answer(None, str(exc), fallback),
+                )
+            return
+        except Exception as exc:  # defensive boundary for the background worker
+            message = f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                self._state.update(
+                    status="failed",
+                    message="Не удалось получить ответ",
+                    error=message,
+                    html=_qa_answer(None, message, []),
+                )
+            return
+
+        with self._lock:
+            self._state.update(
+                status="succeeded",
+                message="Готово",
+                error="",
+                model=result.model,
+                html=_qa_answer(result),
+            )
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -63,6 +165,7 @@ class DashboardServer(ThreadingHTTPServer):
         self.pipeline = pipeline
         self.settings = pipeline.settings
         self.actions = ActionManager(pipeline)
+        self.ask = AskManager(pipeline)
         self.csrf_token = secrets.token_urlsafe(32)
         self.folder_opener = folder_opener
         self.folder_picker = folder_picker
@@ -106,13 +209,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._translation_file(path)
             elif path == "/api/search":
                 self._api_search(query)
+            elif path == "/api/ask-status":
+                self._json(self.server.ask.snapshot())
             elif path == "/api/stats":
                 self._json(self._stats_payload())
             elif path == "/api/activity":
                 self._json(self._activity_payload())
             else:
                 self._error(HTTPStatus.NOT_FOUND, "Page not found")
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             return
         except Exception as exc:  # pragma: no cover - defensive server boundary
             LOG.exception("Web request failed: %s", self.path)
@@ -132,13 +237,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._open_translations_action()
             elif path == "/actions/translate":
                 self._translate_action()
+            elif path == "/api/ask":
+                self._start_ask_action()
             elif path == "/settings/input-dir":
                 self._set_input_dir_action()
             elif path == "/settings/pick-folder":
                 self._pick_folder_action()
             else:
                 self._error(HTTPStatus.NOT_FOUND, "Page not found")
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             return
         except Exception as exc:  # pragma: no cover - defensive server boundary
             LOG.exception("Web POST failed: %s", self.path)
@@ -240,29 +347,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _ask_page(self, query: dict[str, list[str]]) -> None:
         question = _first(query, "q").strip()
-        result = None
-        error = ""
-        fallback = []
-        if question:
-            try:
-                result = ask_documents(self.db, question, self.settings.search, self.settings.qa)
-            except RuntimeError as exc:
-                error = str(exc)
-                try:
-                    fallback = search_chunks(
-                        self.db, question, self.settings.search,
-                        limit=int(self.settings.qa.get("top_k", 8)), mode="auto",
-                    )
-                except RuntimeError:
-                    fallback = []
         body = [
             _page_header("Ask", "Ask a local model about the entire indexed document library."),
-            _ask_form(question),
+            _ask_form(question, self.server.csrf_token),
         ]
-        if question:
-            body.append(_qa_answer(result, error, fallback))
-        else:
-            body.append('<div class="empty">Answers are grounded in retrieved document fragments. Ollama stays local on this computer.</div>')
         self._html("Ask", "".join(body))
 
     def _documents_page(self, query: dict[str, list[str]]) -> None:
@@ -423,6 +511,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         self._action_response({"action": action}, status=HTTPStatus.ACCEPTED)
+
+    def _start_ask_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._json({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        question = data.get("q", "").strip()
+        if not question:
+            self._json({"error": "Question is empty"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            state = self.server.ask.start(question)
+        except ActionBusyError as exc:
+            self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        except ValueError as exc:
+            self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._json(state, status=HTTPStatus.ACCEPTED)
 
     def _check_csrf(self, data: dict[str, str]) -> bool:
         token = data.get("csrf", "")
