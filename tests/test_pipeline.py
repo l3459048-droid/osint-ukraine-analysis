@@ -1460,7 +1460,6 @@ def test_web_can_start_fast_translation_model_setup(tmp_path: Path, monkeypatch)
     import urllib.parse
     import urllib.request
 
-    import osint_local.actions as actions
     import osint_local.web as web
 
     settings = load_settings(make_config(tmp_path))
@@ -1482,7 +1481,7 @@ def test_web_can_start_fast_translation_model_setup(tmp_path: Path, monkeypatch)
 
     try:
         monkeypatch.setattr(web, "fast_translation_available", lambda: True)
-        monkeypatch.setattr(actions, "prepare_fast_model", fake_prepare)
+        monkeypatch.setattr(web, "prepare_fast_model", fake_prepare)
         server = web.create_server(pipeline, "127.0.0.1", 0)
         port = server.server_address[1]
         base = f"http://127.0.0.1:{port}"
@@ -1505,10 +1504,10 @@ def test_web_can_start_fast_translation_model_setup(tmp_path: Path, monkeypatch)
         assert payload["action"]["kind"] == "translation-setup"
 
         deadline = time.time() + 2
-        state = server.actions.snapshot()
+        state = server.fast_setup.snapshot()
         while state["status"] == "running" and time.time() < deadline:
             time.sleep(0.02)
-            state = server.actions.snapshot()
+            state = server.fast_setup.snapshot()
         assert state["status"] == "succeeded"
         assert state["result"]["source_lang"] == "en"
     finally:
@@ -1517,4 +1516,69 @@ def test_web_can_start_fast_translation_model_setup(tmp_path: Path, monkeypatch)
             server.server_close()
         if thread is not None:
             thread.join(timeout=5)
+        pipeline.close()
+
+
+def test_fast_translation_setup_can_start_while_maintenance_is_running(tmp_path: Path, monkeypatch):
+    import threading
+    import time
+
+    import osint_local.web as web
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    maintenance_entered = threading.Event()
+    release_maintenance = threading.Event()
+    prepare_entered = threading.Event()
+
+    def fake_maintenance():
+        maintenance_entered.set()
+        release_maintenance.wait(2)
+        return {
+            "files_seen": 0,
+            "counts": {},
+            "embedded_chunks": 0,
+            "translated": [],
+        }
+
+    def fake_prepare(settings, source_lang, target_lang="ru", *, progress=None, run_benchmark=True):
+        prepare_entered.set()
+        if progress:
+            progress(1, 1, "Fast Translation ready")
+        return {
+            "ready": True,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "model": "fake/opus",
+        }
+
+    try:
+        monkeypatch.setattr(web, "prepare_fast_model", fake_prepare)
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        monkeypatch.setattr(server.actions, "_run_maintenance", fake_maintenance)
+
+        server.actions.start_maintenance()
+        assert maintenance_entered.wait(1)
+        assert server.actions.snapshot()["status"] == "running"
+        assert server.actions.snapshot()["kind"] == "maintenance"
+
+        state = server.fast_setup.start("en")
+        assert state["status"] == "running"
+        assert prepare_entered.wait(1)
+
+        deadline = time.time() + 2
+        state = server.fast_setup.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = server.fast_setup.snapshot()
+
+        assert state["status"] == "succeeded"
+        assert state["result"]["source_lang"] == "en"
+        assert server.actions.snapshot()["status"] == "running"
+    finally:
+        release_maintenance.set()
+        if server is not None:
+            server.server_close()
         pipeline.close()
