@@ -1632,3 +1632,41 @@ def test_translation_http_response_declares_utf8_and_preserves_cyrillic(tmp_path
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+def test_prepare_fast_model_repairs_missing_tokenizer_assets_without_reconversion(tmp_path: Path, monkeypatch):
+    import osint_local.fast_translation as fast
+
+    settings = load_settings(make_config(tmp_path))
+    model_dir = fast.fast_model_dir(settings, "uk", "ru")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "model.bin").write_bytes(b"converted-weights")
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "source.spm").write_bytes(b"source-tokenizer")
+    (cache_dir / "target.spm").write_bytes(b"target-tokenizer")
+
+    downloads = []
+
+    def fake_download(model_id, filename):
+        downloads.append((model_id, filename))
+        return cache_dir / filename
+
+    monkeypatch.setattr(fast, "fast_translation_available", lambda: True)
+    monkeypatch.setattr(fast, "_download_model_asset", fake_download)
+
+    result = fast.prepare_fast_model(
+        settings,
+        "uk",
+        "ru",
+        run_benchmark=False,
+    )
+
+    assert result["ready"] is True
+    assert (model_dir / "model.bin").read_bytes() == b"converted-weights"
+    assert (model_dir / "source.spm").read_bytes() == b"source-tokenizer"
+    assert (model_dir / "target.spm").read_bytes() == b"target-tokenizer"
+    assert [filename for _, filename in downloads] == ["source.spm", "target.spm"]
+    assert fast.fast_model_ready(settings, "uk", "ru") is True
