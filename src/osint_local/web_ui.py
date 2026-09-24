@@ -15,7 +15,7 @@ def _layout(title: str, body: str) -> str:
 </head>
 <body>
 <header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.8.1</span></a><nav>
-<a href="/search">Search</a><a href="/ask">Ask</a><a href="/documents">Documents</a><a href="/system">System</a><a href="/settings">Settings</a>
+<a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
 <footer>Local-first · source files stay on this computer</footer>
@@ -222,25 +222,97 @@ def _translation_panel(csrf_token: str, sha256: str, translations, *, available:
 </section>"""
 
 
-def _ask_form(question: str, csrf_token: str = "", analysis_mode: str = "quick") -> str:
+def _ask_form(
+    question: str,
+    csrf_token: str = "",
+    analysis_mode: str = "quick",
+    *,
+    categories=None,
+    folders=None,
+    documents=None,
+) -> str:
     modes = (
         ("quick", "Быстро"),
         ("deep", "Глубокий анализ"),
         ("compare", "Сравнить документы"),
         ("contradictions", "Найти противоречия"),
     )
-    options = "".join(
+    mode_options = "".join(
         f'<option value="{name}"{" selected" if name == analysis_mode else ""}>{label}</option>'
         for name, label in modes
     )
+    category_options = '<option value="">All categories</option>' + "".join(
+        f'<option value="{_e(row["domain"])}">{_e(row["domain"])} ({int(row["documents"])})</option>'
+        for row in (categories or [])
+    )
+    folder_options = '<option value="">All folders</option>' + "".join(
+        f'<option value="{_e(folder)}">{_e(folder)}</option>' for folder in (folders or [])
+    )
+    document_options = "".join(
+        f'<option value="{_e(row["sha256"])}">{_e(row["source_path"])}</option>'
+        for row in (documents or [])
+    ) or '<option value="" disabled>No documents available</option>'
     return f"""<form class="ask-form" action="/api/ask" method="post" data-ask-form>
 <input type="hidden" name="csrf" value="{_e(csrf_token)}">
-<textarea name="q" rows="3" placeholder="Ask across all documents…">{_e(question)}</textarea>
-<div class="ask-side"><select name="mode" aria-label="Analysis mode">{options}</select><button type="submit">Ask</button></div>
+<input type="hidden" name="documents" value="" data-documents-value>
+<textarea name="q" rows="3" placeholder="Ask across your documents…">{_e(question)}</textarea>
+<div class="ask-side"><select name="mode" aria-label="Analysis mode">{mode_options}</select><button type="submit">Ask</button></div>
+<details class="ask-filters">
+<summary>Filters <span>date · category · folder · documents · language</span></summary>
+<div class="ask-filter-grid">
+<label>Period<select name="period"><option value="">Any time</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option></select></label>
+<label>From<input type="date" name="date_from"></label>
+<label>To<input type="date" name="date_to"></label>
+<label>Category<select name="domain">{category_options}</select></label>
+<label>Folder<select name="folder">{folder_options}</select></label>
+<label>Language<select name="language"><option value="">Any language</option><option value="en">English</option><option value="uk">Ukrainian</option><option value="ru">Russian</option></select></label>
+<label class="ask-documents">Specific documents<select name="documents_multi" multiple size="6" data-documents-select>{document_options}</select></label>
+</div>
+<div class="ask-filter-note">Date filters use the source file modification date. Custom From/To dates override the period shortcut. Multiple filters are combined.</div>
+</details>
 </form>
 <div class="ask-hint">Быстро — короткий ответ · Глубокий — больше источников · Сравнение и противоречия — приоритет нескольким документам.</div>
 <div class="ask-status" data-ask-status hidden></div>
 <div class="ask-results" data-ask-results></div>"""
+
+
+def _chat_messages(history, model: str = "", *, error: str = "") -> str:
+    parts = ['<section class="panel chat-panel"><div class="panel-head"><div><h2>Conversation</h2>']
+    subtitle = "Local model" + (f" · {model}" if model else "")
+    parts.append(f'<span class="panel-subtle">{_e(subtitle)}</span></div></div>')
+    if error:
+        parts.append(f'<div class="alert">{_e(error)}</div>')
+    if not history:
+        parts.append('<div class="empty">No messages yet. Chat is separate from the document library and has no internet access.</div>')
+    else:
+        parts.append('<div class="chat-history">')
+        for item in history:
+            role = "assistant" if item.get("role") == "assistant" else "user"
+            label = "Qwen" if role == "assistant" else "You"
+            parts.append(
+                f'<div class="chat-message {role}"><span>{label}</span><div>{_e(item.get("content") or "")}</div></div>'
+            )
+        parts.append("</div>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def _chat_panel(csrf_token: str, state: dict) -> str:
+    history = state.get("history") or []
+    html = state.get("html") or _chat_messages(history, state.get("model") or "", error=state.get("error") or "")
+    return f"""<div data-chat-root>
+<div class="chat-results" data-chat-results>{html}</div>
+<div class="chat-status" data-chat-status{" hidden" if state.get("status") not in {"running", "failed"} else ""}>{_e(state.get("message") or "")}</div>
+<form class="chat-form" action="/api/chat" method="post" data-chat-form>
+<input type="hidden" name="csrf" value="{_e(csrf_token)}">
+<textarea name="message" rows="3" placeholder="Напиши что-нибудь…"></textarea>
+<div class="chat-actions"><button type="submit">Send</button></div>
+</form>
+<form action="/api/chat-clear" method="post" class="chat-clear-form" data-chat-clear>
+<input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="secondary" type="submit">Clear conversation</button>
+</form>
+<div class="ask-filter-note">Chat uses the local Ollama model only. It does not search your documents or the internet.</div>
+</div>"""
 
 
 def _qa_answer(result, error: str = "", fallback_hits=None) -> str:
@@ -460,6 +532,8 @@ CSS = r"""
 @media(max-width:700px){.action-panel{grid-template-columns:1fr}.action-buttons{grid-column:1/-1;flex-wrap:wrap}.activity-body{grid-template-columns:1fr}}
 .setup-panel{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,1.2fr);gap:18px;align-items:center;background:linear-gradient(180deg,#121a20,var(--panel));border:1px solid #2c5365;border-radius:14px;padding:18px;margin:0 0 18px}.setup-panel h2{margin:5px 0 4px;font-size:20px}.setup-panel p,.settings-row p{margin:4px 0 0;color:var(--muted);font-size:13px}.setup-actions{display:flex;flex-direction:column;gap:8px;align-items:stretch}.setup-actions form,.settings-actions form{margin:0}.setup-actions button,.settings-panel button,.ghost-action{font:inherit;border-radius:9px;padding:10px 13px;cursor:pointer}.setup-actions button,.settings-panel button{background:var(--accent);color:#041014;border:0;font-weight:800}.setup-actions .secondary,.settings-panel .secondary{background:var(--panel2);color:var(--text);border:1px solid var(--line)}.path-form,.settings-path{display:grid;grid-template-columns:minmax(160px,1fr) auto;gap:8px}.path-form input,.settings-path input{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px 11px;font:inherit;min-width:0}.ghost-action{background:transparent;color:var(--muted);border:1px solid transparent}.ghost-action:hover{color:var(--text)}.path-note{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(620px,65vw)}.settings-panel{padding:0}.settings-row{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:17px 18px;border-top:1px solid var(--line)}.settings-row:first-child{border-top:0}.settings-row strong{display:block;overflow-wrap:anywhere}.setting-label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.settings-actions{display:flex;gap:8px;flex-shrink:0}.settings-path{padding:0 18px 17px}.action-buttons .ghost-action{padding:12px 10px}.action-buttons form:not([data-action-form]){margin:0}.panel-subtle{display:block;color:var(--muted);font-size:12px;margin-top:3px}.translation-form{display:flex;align-items:end;gap:8px;flex-wrap:wrap}.translation-form label{color:var(--muted);font-size:11px;display:flex;flex-direction:column;gap:4px}.translation-form select{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;min-width:120px}.translation-form button,.tiny-button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font:inherit;cursor:pointer}.translation-form button{background:var(--accent);color:#041014;border-color:transparent;font-weight:800}.translation-form button:disabled{opacity:.45}.translation-arrow{color:var(--muted);padding-bottom:9px}.translation-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.translation-item{border:1px solid var(--line);border-radius:9px;padding:7px 9px;text-decoration:none;color:var(--text);display:flex;gap:8px;align-items:center}.translation-item small,.translation-empty,.translation-status{color:var(--muted);font-size:12px}.translation-status{min-height:18px;margin-top:8px}@media(max-width:760px){.setup-panel{grid-template-columns:1fr}.settings-row{align-items:flex-start;flex-direction:column}.settings-actions{width:100%;flex-wrap:wrap}.path-form,.settings-path{grid-template-columns:1fr}.path-note{max-width:85vw}}
 .ask-form{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:stretch;margin:0 0 8px}.ask-form textarea{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:13px;font:inherit;resize:vertical;min-height:78px}.ask-side{display:flex;flex-direction:column;gap:8px;min-width:190px}.ask-side select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:inherit}.ask-form button{background:var(--accent);color:#041014;border:0;border-radius:10px;padding:0 22px;min-height:42px;font:inherit;font-weight:800;cursor:pointer}.ask-hint{color:var(--muted);font-size:12px;margin:0 0 14px}.answer-text{white-space:pre-wrap;line-height:1.65}.qa-sources{display:flex;flex-direction:column}.qa-source{display:flex;gap:10px;padding:10px 0;border-top:1px solid var(--line);text-decoration:none;color:var(--text)}.qa-source:first-child{border-top:0}.qa-source b{color:var(--accent)}.reader-panel{scroll-margin-top:80px}.reader-nav{display:flex;gap:12px;flex-wrap:wrap}.reader-grid{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line)}.reader-grid>div{min-width:0;padding:14px}.reader-grid>div+div{border-left:1px solid var(--line)}.reader-grid pre{white-space:pre-wrap;word-break:break-word;line-height:1.55;margin:8px 0 0;max-height:65vh;overflow:auto}.reader-label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.reader-empty{color:var(--muted);padding:18px 0;line-height:1.5}.fixed-target{display:block;background:#0d1116;border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:120px;color:var(--text)}@media(max-width:800px){.reader-grid{grid-template-columns:1fr}.reader-grid>div+div{border-left:0;border-top:1px solid var(--line)}.ask-form{grid-template-columns:1fr}.ask-side{min-width:0}.ask-form button{padding:12px}}
+
+.ask-filters{grid-column:1/-1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:0 12px}.ask-filters summary{cursor:pointer;color:var(--muted);padding:10px 2px}.ask-filters summary span{font-size:12px;margin-left:6px}.ask-filter-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:4px 0 12px}.ask-filter-grid label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:12px}.ask-filter-grid input,.ask-filter-grid select{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit}.ask-documents{grid-column:1/-1}.ask-documents select{min-height:120px}.ask-filter-note{color:var(--muted);font-size:12px;margin:0 0 12px}.chat-form{display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:12px}.chat-form textarea{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:13px;font:inherit;resize:vertical;min-height:78px}.chat-form button{background:var(--accent);color:#041014;border:0;border-radius:10px;padding:0 22px;font:inherit;font-weight:800;cursor:pointer}.chat-actions{display:flex}.chat-clear-form{margin:8px 0 10px}.chat-clear-form button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px 12px;cursor:pointer}.chat-history{display:flex;flex-direction:column;gap:10px}.chat-message{max-width:88%;border:1px solid var(--line);border-radius:12px;padding:11px 13px}.chat-message.user{align-self:flex-end;background:#10202a}.chat-message.assistant{align-self:flex-start;background:var(--panel2)}.chat-message>span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.chat-message>div{white-space:pre-wrap;overflow-wrap:anywhere}.chat-status{color:var(--muted);font-size:13px;margin:8px 0}.chat-status.action-error{color:var(--danger)}@media(max-width:800px){.ask-filter-grid{grid-template-columns:1fr 1fr}.chat-form{grid-template-columns:1fr}.chat-form button{padding:12px}}@media(max-width:520px){.ask-filter-grid{grid-template-columns:1fr}}
 """
 
 
@@ -583,9 +657,14 @@ UI_SCRIPT = r"""
       }
       if (askButton) askButton.disabled = true;
       try {
+        const formData = new FormData(askForm);
+        const documentsSelect = askForm.querySelector('[data-documents-select]');
+        const documentsValue = [...(documentsSelect ? documentsSelect.selectedOptions : [])]
+          .map(option => option.value).filter(Boolean).join(',');
+        formData.set('documents', documentsValue);
         const response = await fetch(askForm.action, {
           method: 'POST',
-          body: new URLSearchParams(new FormData(askForm)),
+          body: new URLSearchParams(formData),
           headers: {'X-Requested-With': 'fetch'},
         });
         const state = await response.json();
@@ -603,6 +682,95 @@ UI_SCRIPT = r"""
     });
 
     pollAsk();
+  }
+
+  const chatForm = document.querySelector('[data-chat-form]');
+  if (chatForm) {
+    const chatRoot = document.querySelector('[data-chat-root]');
+    const chatStatus = document.querySelector('[data-chat-status]');
+    const chatResults = document.querySelector('[data-chat-results]');
+    const chatButton = chatForm.querySelector('button[type="submit"]');
+    const clearForm = document.querySelector('[data-chat-clear]');
+    let chatRunning = false;
+
+    function renderChat(state) {
+      chatRunning = state.status === 'running';
+      if (chatButton) chatButton.disabled = chatRunning;
+      if (clearForm) {
+        const clearButton = clearForm.querySelector('button');
+        if (clearButton) clearButton.disabled = chatRunning;
+      }
+      if (chatStatus) {
+        chatStatus.hidden = !(chatRunning || state.status === 'failed');
+        chatStatus.classList.toggle('action-error', state.status === 'failed');
+        chatStatus.textContent = state.error || state.message || '';
+      }
+      if (chatResults && state.html) chatResults.innerHTML = state.html;
+      if (state.status === 'succeeded') {
+        const textarea = chatForm.querySelector('textarea[name="message"]');
+        if (textarea) textarea.value = '';
+      }
+    }
+
+    async function pollChat() {
+      try {
+        const response = await fetch('/api/chat-status', {cache: 'no-store'});
+        if (response.ok) renderChat(await response.json());
+      } catch (_) {}
+      setTimeout(pollChat, chatRunning ? 700 : 2500);
+    }
+
+    chatForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const textarea = chatForm.querySelector('textarea[name="message"]');
+      if (!textarea || !textarea.value.trim()) return;
+      if (chatStatus) {
+        chatStatus.hidden = false;
+        chatStatus.classList.remove('action-error');
+        chatStatus.textContent = 'Ollama формирует ответ…';
+      }
+      if (chatButton) chatButton.disabled = true;
+      try {
+        const response = await fetch(chatForm.action, {
+          method: 'POST',
+          body: new URLSearchParams(new FormData(chatForm)),
+          headers: {'X-Requested-With': 'fetch'},
+        });
+        const state = await response.json();
+        if (!response.ok) throw new Error(state.error || 'Chat failed');
+        renderChat(state);
+      } catch (error) {
+        chatRunning = false;
+        if (chatButton) chatButton.disabled = false;
+        if (chatStatus) {
+          chatStatus.hidden = false;
+          chatStatus.classList.add('action-error');
+          chatStatus.textContent = error.message || 'Chat failed';
+        }
+      }
+    });
+
+    if (clearForm) clearForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      try {
+        const response = await fetch(clearForm.action, {
+          method: 'POST',
+          body: new URLSearchParams(new FormData(clearForm)),
+          headers: {'X-Requested-With': 'fetch'},
+        });
+        const state = await response.json();
+        if (!response.ok) throw new Error(state.error || 'Clear failed');
+        renderChat(state);
+      } catch (error) {
+        if (chatStatus) {
+          chatStatus.hidden = false;
+          chatStatus.classList.add('action-error');
+          chatStatus.textContent = error.message || 'Clear failed';
+        }
+      }
+    });
+
+    pollChat();
   }
 
   const panel = document.querySelector('[data-action-panel]');
@@ -678,3 +846,4 @@ UI_SCRIPT = r"""
 # v0.4.1 UX additions are intentionally compact
 
 # v0.8 status UI
+
