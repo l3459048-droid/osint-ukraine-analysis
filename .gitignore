@@ -192,3 +192,12 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# OSINT local runtime
+config.json
+workspace/
+inbox/
+
+# Legacy Google OAuth secrets (legacy code may still be present)
+credentials.json
+token.json
