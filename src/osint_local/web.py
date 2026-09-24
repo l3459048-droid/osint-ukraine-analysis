@@ -311,6 +311,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._documents_page(query)
             elif path == "/ask":
                 self._ask_page(query)
+            elif path == "/chat":
+                self._chat_page(query)
             elif path == "/settings":
                 self._settings_page(query)
             elif path == "/system":
@@ -325,6 +327,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._api_search(query)
             elif path == "/api/ask-status":
                 self._json(self.server.ask.snapshot())
+            elif path == "/api/chat-status":
+                self._json(self.server.chat.snapshot())
             elif path == "/api/stats":
                 self._json(self._stats_payload())
             elif path == "/api/system":
@@ -357,6 +361,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._translate_action()
             elif path == "/api/ask":
                 self._start_ask_action()
+            elif path == "/api/chat":
+                self._start_chat_action()
+            elif path == "/api/chat-clear":
+                self._clear_chat_action()
             elif path == "/settings/input-dir":
                 self._set_input_dir_action()
             elif path == "/settings/performance":
@@ -473,10 +481,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if analysis_mode not in ASK_MODES:
             analysis_mode = "quick"
         body = [
-            _page_header("Ask", "Ask a local model about the entire indexed document library."),
-            _ask_form(question, self.server.csrf_token, analysis_mode),
+            _page_header("Ask", "Grounded answers from the selected part of your local document library."),
+            _ask_form(
+                question,
+                self.server.csrf_token,
+                analysis_mode,
+                categories=self.db.category_counts(),
+                folders=self.db.folder_choices(),
+                documents=self.db.list_documents(limit=500),
+            ),
         ]
         self._html("Ask", "".join(body))
+
+    def _chat_page(self, query: dict[str, list[str]]) -> None:
+        state = self.server.chat.snapshot()
+        body = [
+            _page_header(
+                "Chat",
+                "General local Qwen chat. This mode does not search documents or the internet.",
+            ),
+            _chat_panel(self.server.csrf_token, state),
+        ]
+        self._html("Chat", "".join(body))
 
     def _documents_page(self, query: dict[str, list[str]]) -> None:
         domain = _first(query, "domain").strip() or None
@@ -707,7 +733,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"error": "Unknown Ask mode"}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            state = self.server.ask.start(question, analysis_mode)
+            filters = self._ask_filters_from_data(data)
+            state = self.server.ask.start(question, analysis_mode, filters)
         except ActionBusyError as exc:
             self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
@@ -715,6 +742,104 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
         self._json(state, status=HTTPStatus.ACCEPTED)
+
+    def _start_chat_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._json({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        message = data.get("message", "").strip()
+        if not message:
+            self._json({"error": "Message is empty"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            state = self.server.chat.start(message)
+        except ActionBusyError as exc:
+            self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        except ValueError as exc:
+            self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._json(state, status=HTTPStatus.ACCEPTED)
+
+    def _clear_chat_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._json({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        try:
+            state = self.server.chat.clear()
+        except ActionBusyError as exc:
+            self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self._json(state, status=HTTPStatus.OK)
+
+    def _ask_filters_from_data(self, data: dict[str, str]) -> dict:
+        filters: dict = {}
+
+        domain = data.get("domain", "").strip()
+        if domain:
+            filters["domain"] = domain
+
+        folder = data.get("folder", "").strip().replace("\\", "/").strip("/")
+        if folder:
+            filters["source_prefix"] = folder
+
+        language = data.get("language", "").strip().casefold()
+        if language:
+            if language not in {"en", "uk", "ru"}:
+                raise ValueError("Unsupported language filter")
+            filters["language"] = language
+
+        raw_documents = data.get("documents", "").strip()
+        if raw_documents:
+            document_sha256s = []
+            for value in raw_documents.split(","):
+                sha256 = value.strip().casefold()
+                if not SHA_RE.fullmatch(sha256):
+                    raise ValueError("Invalid document filter")
+                if self.db.get_document(sha256):
+                    document_sha256s.append(sha256)
+            if not document_sha256s:
+                raise ValueError("Selected documents were not found")
+            filters["document_sha256s"] = list(dict.fromkeys(document_sha256s))
+
+        date_from = data.get("date_from", "").strip()
+        date_to = data.get("date_to", "").strip()
+        period = data.get("period", "").strip()
+
+        if date_from:
+            filters["date_from_ns"] = self._local_date_ns(date_from)
+        elif period:
+            try:
+                days = int(period)
+            except ValueError as exc:
+                raise ValueError("Invalid period filter") from exc
+            if days not in {7, 30, 90, 365}:
+                raise ValueError("Invalid period filter")
+            start = datetime.now().astimezone() - timedelta(days=days)
+            filters["date_from_ns"] = int(start.timestamp() * 1_000_000_000)
+
+        if date_to:
+            end = datetime.fromisoformat(date_to).astimezone() + timedelta(days=1)
+            filters["date_to_ns"] = int(end.timestamp() * 1_000_000_000)
+
+        if (
+            filters.get("date_from_ns") is not None
+            and filters.get("date_to_ns") is not None
+            and int(filters["date_from_ns"]) >= int(filters["date_to_ns"])
+        ):
+            raise ValueError("Date from must be before date to")
+
+        return filters
+
+    @staticmethod
+    def _local_date_ns(value: str) -> int:
+        try:
+            point = datetime.fromisoformat(value).astimezone()
+        except ValueError as exc:
+            raise ValueError("Invalid date filter") from exc
+        return int(point.timestamp() * 1_000_000_000)
 
     def _check_csrf(self, data: dict[str, str]) -> bool:
         token = data.get("csrf", "")
