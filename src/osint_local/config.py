@@ -51,7 +51,7 @@ PERFORMANCE_PROFILES = {
         "translation": {"max_per_cycle": 2},
         "background": {"interval_seconds": 60},
         "qa": {
-            "top_k": 6,
+            "top_k": 5,
             "max_context_chars": 9000,
             "num_ctx": 4096,
             "think": False,
@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
         "min_chunk_chars": 80,
         "semantic_enabled": True,
         "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        "batch_size": 32,
+        "batch_size": 12,
         "auto_embed": False,
     },
     "translation": {
@@ -97,7 +97,7 @@ DEFAULT_CONFIG = {
     "background": {
         "enabled": True,
         "initial_delay_seconds": 3,
-        "interval_seconds": 60,
+        "interval_seconds": 90,
         "auto_index": True,
     },
     "qa": {
@@ -105,7 +105,7 @@ DEFAULT_CONFIG = {
         "base_url": "http://127.0.0.1:11434",
         "model": "qwen3:1.7b",
         "top_k": 6,
-        "max_context_chars": 8000,
+        "max_context_chars": 6500,
         "num_ctx": 4096,
         "think": False,
         "keep_alive": 0,
@@ -169,6 +169,8 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
     if config_path.exists():
         user = json.loads(config_path.read_text(encoding="utf-8"))
         _deep_update(data, user)
+        if "performance" not in user:
+            _deep_update(data, performance_profile_patch("economy"))
 
     return Settings(
         config_path=config_path,
@@ -203,6 +205,8 @@ def update_config(path: str | Path, patch: dict[str, Any]) -> Path:
     if path.exists():
         current = json.loads(path.read_text(encoding="utf-8"))
         _deep_update(data, current)
+        if "performance" not in current:
+            _deep_update(data, performance_profile_patch("economy"))
     _deep_update(data, patch)
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(path, data)
