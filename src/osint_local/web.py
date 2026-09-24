@@ -20,7 +20,7 @@ from .background import BackgroundLoop
 from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
 from .pipeline import LocalPipeline
-from .qa import ask_documents, ollama_models
+from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
 from .search import search_chunks
 from .translation import argos_available, installed_pairs, translation_queue_status
@@ -70,16 +70,20 @@ class AskManager:
             "html": "",
             "error": "",
             "model": "",
+            "mode": "quick",
         }
 
     def snapshot(self) -> dict:
         with self._lock:
             return dict(self._state)
 
-    def start(self, question: str) -> dict:
+    def start(self, question: str, analysis_mode: str = "quick") -> dict:
         question = question.strip()
+        analysis_mode = str(analysis_mode or "quick").strip().casefold()
         if not question:
             raise ValueError("Question is empty")
+        if analysis_mode not in ASK_MODES:
+            raise ValueError("Unknown Ask mode")
         with self._lock:
             if self._state.get("status") == "running":
                 raise ActionBusyError("A question is already being processed")
@@ -90,11 +94,12 @@ class AskManager:
                 "html": "",
                 "error": "",
                 "model": "",
+                "mode": analysis_mode,
             }
             initial = dict(self._state)
             threading.Thread(
                 target=self._worker,
-                args=(question,),
+                args=(question, analysis_mode),
                 name="osint-local-ask",
                 daemon=True,
             ).start()
@@ -103,6 +108,7 @@ class AskManager:
     def _progress(self, stage: str) -> None:
         messages = {
             "searching": "Ищу релевантные фрагменты…",
+            "reviewing": "Объединяю и отбираю лучшие источники…",
             "generating": "Ollama формирует ответ…",
             "done": "Готово",
         }
@@ -110,13 +116,14 @@ class AskManager:
             if self._state.get("status") == "running":
                 self._state["message"] = messages.get(stage, stage)
 
-    def _worker(self, question: str) -> None:
+    def _worker(self, question: str, analysis_mode: str) -> None:
         try:
             result = ask_documents(
                 self.pipeline.db,
                 question,
                 self.pipeline.settings.search,
                 self.pipeline.settings.qa,
+                analysis_mode=analysis_mode,
                 progress=self._progress,
             )
         except RuntimeError as exc:
@@ -156,6 +163,7 @@ class AskManager:
                 message="Готово",
                 error="",
                 model=result.model,
+                mode=result.mode,
                 html=_qa_answer(result),
             )
 
@@ -331,7 +339,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _search_page(self, query: dict[str, list[str]]) -> None:
         q = _first(query, "q").strip()
         mode = _first(query, "mode") or "auto"
-        if mode not in {"auto", "semantic", "lexical"}:
+        if mode not in {"auto", "hybrid", "semantic", "lexical"}:
             mode = "auto"
         try:
             limit = min(100, max(1, int(_first(query, "limit") or 10)))
@@ -361,9 +369,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _ask_page(self, query: dict[str, list[str]]) -> None:
         question = _first(query, "q").strip()
+        analysis_mode = _first(query, "mode").strip().casefold() or "quick"
+        if analysis_mode not in ASK_MODES:
+            analysis_mode = "quick"
         body = [
             _page_header("Ask", "Ask a local model about the entire indexed document library."),
-            _ask_form(question, self.server.csrf_token),
+            _ask_form(question, self.server.csrf_token, analysis_mode),
         ]
         self._html("Ask", "".join(body))
 
@@ -588,11 +599,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
             return
         question = data.get("q", "").strip()
+        analysis_mode = data.get("mode", "quick").strip().casefold()
         if not question:
             self._json({"error": "Question is empty"}, status=HTTPStatus.BAD_REQUEST)
             return
+        if analysis_mode not in ASK_MODES:
+            self._json({"error": "Unknown Ask mode"}, status=HTTPStatus.BAD_REQUEST)
+            return
         try:
-            state = self.server.ask.start(question)
+            state = self.server.ask.start(question, analysis_mode)
         except ActionBusyError as exc:
             self._json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
