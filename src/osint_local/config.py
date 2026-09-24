@@ -56,6 +56,19 @@ DEFAULT_CONFIG = {
         "default_target": "ru",
         "max_chars_per_request": 1800,
         "auto_install_models": True,
+        "passive_enabled": True,
+    },
+    "background": {
+        "enabled": True,
+        "interval_seconds": 60,
+        "auto_index": True,
+    },
+    "qa": {
+        "enabled": True,
+        "base_url": "http://127.0.0.1:11434",
+        "model": "",
+        "top_k": 8,
+        "max_context_chars": 14000,
     },
     "web": {
         "host": "127.0.0.1",
@@ -79,6 +92,8 @@ class Settings:
     classification: dict[str, Any]
     search: dict[str, Any]
     translation: dict[str, Any]
+    background: dict[str, Any]
+    qa: dict[str, Any]
     web: dict[str, Any]
     ui: dict[str, Any]
 
@@ -124,6 +139,8 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         classification=data["classification"],
         search=data["search"],
         translation=data["translation"],
+        background=data["background"],
+        qa=data["qa"],
         web=data["web"],
         ui=data["ui"],
     )

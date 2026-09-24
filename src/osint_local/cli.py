@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import load_settings, update_config, write_default_config
 from .pipeline import LocalPipeline
+from .qa import ask_documents, ollama_models
 from .search import build_embeddings, search_chunks
 from .translation import argos_available, installed_pairs, translate_document
 
@@ -48,10 +49,12 @@ def main() -> int:
     search.add_argument("--mode", choices=["auto", "semantic", "lexical"], default="auto")
     search.add_argument("--json", action="store_true", dest="as_json")
 
-    translate_cmd = sub.add_parser("translate", help="Translate one processed document offline")
+    translate_cmd = sub.add_parser("translate", help="Translate one English/Ukrainian document to Russian offline")
     translate_cmd.add_argument("sha256")
-    translate_cmd.add_argument("--from", dest="source_lang", choices=["auto", "en", "ru", "uk"], default="auto")
-    translate_cmd.add_argument("--to", dest="target_lang", choices=["en", "ru", "uk"], required=True)
+    translate_cmd.add_argument("--from", dest="source_lang", choices=["auto", "en", "uk"], default="auto")
+
+    ask_cmd = sub.add_parser("ask", help="Ask a local Ollama model about all indexed documents")
+    ask_cmd.add_argument("question")
 
     serve_cmd = sub.add_parser("serve", help="Run the local Web UI")
     serve_cmd.add_argument("--host", default=None, help="Bind address (default from config)")
@@ -130,12 +133,25 @@ def main() -> int:
             try:
                 result = translate_document(
                     settings, pipeline.db, args.sha256,
-                    source_lang=args.source_lang, target_lang=args.target_lang,
+                    source_lang=args.source_lang, target_lang="ru",
                 )
             except RuntimeError as exc:
                 print(str(exc))
                 return 2
             print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "ask":
+            try:
+                result = ask_documents(pipeline.db, args.question, settings.search, settings.qa)
+            except RuntimeError as exc:
+                print(str(exc))
+                return 2
+            print(result.answer)
+            print("\nSources:")
+            for index, hit in enumerate(result.sources, 1):
+                location = hit.source_path + (f" — page {hit.page}" if hit.page is not None else "")
+                print(f"[{index}] {location}")
             return 0
 
         if args.command == "serve":
@@ -166,7 +182,15 @@ def main() -> int:
                 "argos_translate_installed": argos_available(),
                 "translation_pairs": [f"{a}->{b}" for a, b in sorted(installed_pairs())] if argos_available() else [],
                 "translations_dir": str(settings.translations_dir),
+                "passive_translation": bool(settings.translation.get("passive_enabled", True)),
+                "background_enabled": bool(settings.background.get("enabled", True)),
+                "ollama_models": [],
             }
+            if bool(settings.qa.get("enabled", True)):
+                try:
+                    info["ollama_models"] = ollama_models(str(settings.qa.get("base_url") or "http://127.0.0.1:11434"))
+                except RuntimeError:
+                    info["ollama_models"] = []
             print(json.dumps(info, ensure_ascii=False, indent=2))
             return 0 if info["workspace_writable"] else 1
     finally:

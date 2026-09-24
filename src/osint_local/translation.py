@@ -9,6 +9,7 @@ from typing import Callable
 
 PAGE_RE = re.compile(r"(?:^|\n)\s*--- PAGE (\d+) ---\s*\n", re.MULTILINE)
 SUPPORTED_LANGS = {"en": "English", "ru": "Russian", "uk": "Ukrainian"}
+ALLOWED_PAIRS = {("en", "ru"), ("uk", "ru")}
 
 
 def argos_available() -> bool:
@@ -49,9 +50,10 @@ def translate_document(
     sha256: str,
     *,
     source_lang: str = "auto",
-    target_lang: str = "en",
+    target_lang: str = "ru",
     translator: Callable[[str, str, str], str] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    allow_model_install: bool = True,
 ) -> dict:
     doc = db.get_document(sha256)
     if not doc:
@@ -64,25 +66,39 @@ def translate_document(
     dst = target_lang
     if src not in SUPPORTED_LANGS or dst not in SUPPORTED_LANGS:
         raise RuntimeError("Supported translation languages are en, ru and uk")
-    if src == dst:
-        raise RuntimeError("Source and target languages are the same")
+    if src == "ru":
+        raise RuntimeError("Document already appears to be Russian")
+    if (src, dst) not in ALLOWED_PAIRS:
+        raise RuntimeError("Translation is limited to English→Russian and Ukrainian→Russian")
 
     custom_translator = translator is not None
     if translator is None:
         if not argos_available():
             raise RuntimeError("Offline translation is not installed. Install: pip install -e '.[translate]'")
         if (src, dst) not in installed_pairs():
-            if not bool(settings.translation.get("auto_install_models", True)):
+            if not allow_model_install or not bool(settings.translation.get("auto_install_models", True)):
                 raise RuntimeError(f"Argos language pair {src}→{dst} is not installed")
             if progress:
                 progress(0, 0, f"Installing language model {src}→{dst}…")
             from argostranslate import package as argos_package
             argos_package.update_package_index()
             available = argos_package.get_available_packages()
-            package = next((p for p in available if p.from_code == src and p.to_code == dst), None)
-            if package is None:
+            direct = next((p for p in available if p.from_code == src and p.to_code == dst), None)
+            if direct is not None:
+                argos_package.install_from_path(direct.download())
+            elif src != "en" and dst != "en":
+                # Argos can pivot through installed intermediate languages. Ukrainian→Russian
+                # commonly uses uk→en plus en→ru when no direct package exists.
+                route = []
+                for a, b in ((src, "en"), ("en", dst)):
+                    package = next((p for p in available if p.from_code == a and p.to_code == b), None)
+                    if package is None:
+                        raise RuntimeError(f"No Argos package route is available for {src}→{dst}")
+                    route.append(package)
+                for package in route:
+                    argos_package.install_from_path(package.download())
+            else:
                 raise RuntimeError(f"No Argos language model is available for {src}→{dst}")
-            argos_package.install_from_path(package.download())
         from argostranslate import translate as argos_translate
         translator = lambda value, a, b: argos_translate.translate(value, a, b)
 
@@ -193,3 +209,28 @@ def _atomic_write(path: Path, content: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
+
+
+def next_passive_translation(settings, db, *, progress=None, translator=None, available_pairs=None) -> dict | None:
+    """Translate at most one EN/UK document to Russian without installing models in the background."""
+    if translator is None and not argos_available():
+        return None
+    pairs = set(available_pairs) if available_pairs is not None else installed_pairs()
+    for doc in db.list_documents(limit=500):
+        sha256 = doc["sha256"]
+        text_path = settings.text_dir / f"{sha256}.txt"
+        if not text_path.is_file():
+            continue
+        text = text_path.read_text(encoding="utf-8", errors="replace")
+        src = detect_language(text)
+        if src not in {"en", "uk"}:
+            continue
+        if db.get_translation(sha256, src, "ru"):
+            continue
+        if translator is None and (src, "ru") not in pairs:
+            continue
+        return translate_document(
+            settings, db, sha256, source_lang=src, target_lang="ru",
+            translator=translator, progress=progress, allow_model_install=False,
+        )
+    return None

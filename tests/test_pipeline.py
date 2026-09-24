@@ -276,7 +276,7 @@ def test_web_ui_dashboard_search_document_and_range_source(tmp_path: Path):
         ) as response:
             body = response.read().decode("utf-8")
             assert "drones.txt" in body
-            assert "Context" in body
+            assert "Read" in body
 
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/documents/{result.sha256}", timeout=5
@@ -616,3 +616,141 @@ def test_translation_saves_separate_page_aware_markdown(tmp_path: Path):
 def test_translation_default_folder_is_sibling_of_input(tmp_path: Path):
     settings = load_settings(make_config(tmp_path))
     assert settings.translations_dir == settings.input_dir.parent / "translations"
+
+
+
+def test_translation_restricted_to_english_or_ukrainian_to_russian(tmp_path: Path):
+    import pytest
+    from osint_local.translation import translate_document
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "english.txt"
+    source.write_text("English source document.", encoding="utf-8")
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(source)
+        with pytest.raises(RuntimeError, match="English→Russian"):
+            translate_document(
+                settings, pipeline.db, processed.sha256,
+                source_lang="en", target_lang="uk",
+                translator=lambda text, src, dst: text,
+            )
+    finally:
+        pipeline.close()
+
+
+def test_passive_translation_processes_only_one_document_per_cycle(tmp_path: Path):
+    from osint_local.translation import next_passive_translation
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "one.txt").write_text("English drone report one.", encoding="utf-8")
+    (settings.input_dir / "two.txt").write_text("English drone report two.", encoding="utf-8")
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.scan()
+        first = next_passive_translation(
+            settings, pipeline.db,
+            translator=lambda text, src, dst: "RU " + text,
+            available_pairs={("en", "ru")},
+        )
+        assert first is not None
+        translated_after_first = sum(len(pipeline.db.list_translations(row["sha256"])) for row in pipeline.db.list_documents(limit=10))
+        assert translated_after_first == 1
+        second = next_passive_translation(
+            settings, pipeline.db,
+            translator=lambda text, src, dst: "RU " + text,
+            available_pairs={("en", "ru")},
+        )
+        assert second is not None
+        translated_after_second = sum(len(pipeline.db.list_translations(row["sha256"])) for row in pipeline.db.list_documents(limit=10))
+        assert translated_after_second == 2
+    finally:
+        pipeline.close()
+
+
+def test_reader_aligns_original_and_russian_translation_by_page(tmp_path: Path):
+    from osint_local.reader import load_reader
+    from osint_local.translation import translate_document
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "paged.txt"
+    source.write_text("--- PAGE 1 ---\nEnglish page one.\n\n--- PAGE 2 ---\nEnglish page two.", encoding="utf-8")
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(source)
+        translate_document(
+            settings, pipeline.db, processed.sha256,
+            source_lang="en", target_lang="ru",
+            translator=lambda text, src, dst: "РУ " + text,
+        )
+        reader = load_reader(settings, pipeline.db, processed.sha256, 2)
+        assert reader.selected is not None
+        assert reader.selected.page == 2
+        assert "English page two" in reader.selected.original
+        assert "РУ" in (reader.selected.translation or "")
+    finally:
+        pipeline.close()
+
+
+def test_qa_uses_retrieved_document_sources_with_local_client(tmp_path: Path):
+    from osint_local.qa import ask_documents
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "qa.txt"
+    source.write_text("FPV drones are used for reconnaissance and logistics observation.", encoding="utf-8")
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(source)
+        assert processed.status == "processed"
+        captured = {}
+
+        def fake_chat(base_url, model, messages):
+            captured["model"] = model
+            captured["messages"] = messages
+            return "FPV drones are used for reconnaissance [1]."
+
+        result = ask_documents(
+            pipeline.db,
+            "What are FPV drones used for?",
+            settings.search,
+            {"base_url": "http://127.0.0.1:11434", "model": "fake-local", "top_k": 4, "max_context_chars": 5000},
+            chat_client=fake_chat,
+        )
+        assert "[1]" in result.answer
+        assert result.sources[0].source_path == "qa.txt"
+        assert captured["model"] == "fake-local"
+        assert "qa.txt" in captured["messages"][1]["content"]
+    finally:
+        pipeline.close()
+
+
+def test_background_maintenance_scans_without_parallel_user_action(tmp_path: Path):
+    import time
+    from osint_local.actions import ActionManager
+
+    config = json.loads(make_config(tmp_path).read_text(encoding="utf-8"))
+    config["background"] = {"enabled": True, "interval_seconds": 120, "auto_index": False}
+    config["translation"] = {"passive_enabled": False}
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps(config), encoding="utf-8")
+    settings = load_settings(cfg)
+    settings.input_dir.mkdir(parents=True)
+    (settings.input_dir / "passive.txt").write_text("fpv drone passive", encoding="utf-8")
+    pipeline = LocalPipeline(settings)
+    try:
+        manager = ActionManager(pipeline)
+        state = manager.start_maintenance()
+        assert state["kind"] == "maintenance"
+        deadline = time.time() + 5
+        state = manager.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = manager.snapshot()
+        assert state["status"] == "succeeded"
+        assert pipeline.db.document_count() == 1
+    finally:
+        pipeline.close()

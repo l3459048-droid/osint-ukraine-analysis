@@ -1,22 +1,29 @@
 # Migration from Xolthol/osint-ukraine-analysis
 
-The fork now uses a local-first runtime through v0.4.1.
+The fork now uses the local-first runtime through v0.6.
 
-## Migration path
+## Active runtime
 
-1. Keep the original repository history and legacy Google Drive scripts for reference.
-2. Use `src/osint_local/`, `pyproject.toml`, `config.json` and `workspace/` as the active runtime.
-3. Run `osint-local serve` (or `start_local.bat`). On a fresh install the Web UI creates the config and asks for the document folder.
-4. Use `Scan` in the UI (or `osint-local scan`) to extract/classify/chunk documents.
-5. Optionally install `.[search]` and use `Build/Update index` for multilingual semantic embeddings.
-6. Change or open the source folder later from the compact Settings/UI controls.
+Use:
 
-The old Google-specific files can later move under `legacy/google_drive/`, but v0.4.1 leaves them untouched so the migration remains reversible.
+- `src/osint_local/`
+- `pyproject.toml`
+- `config.json`
+- `workspace/`
+- `translations/`
 
-## Database compatibility
+The legacy Google Drive scripts remain untouched for reversibility but are not part of the primary runtime.
 
-v0.1 SQLite databases are upgraded automatically. Documents processed by v0.1 without page-aware chunks are reprocessed once by later versions. v0.2-v0.4 databases require no destructive migration for the v0.4.1 UX update.
+## Upgrade behavior
 
-## v0.5 translation
+Existing SQLite databases are upgraded in place. No database reset is required for v0.6. Existing extracted text, chunks, embeddings and translations remain usable.
 
-No database reset is required. The `translations` table is created automatically. Generated translations are stored outside the source folder by default and do not replace or modify source files.
+New v0.6 capabilities are additive:
+
+- original/Russian side-by-side reader;
+- search links jump to the matching page;
+- translation policy narrowed to EN/UK → RU;
+- passive scan/index/one-document translation loop while `serve` runs;
+- local RAG Q&A through Ollama.
+
+Source documents remain read-only throughout the migration.

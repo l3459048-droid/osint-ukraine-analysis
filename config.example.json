@@ -84,6 +84,27 @@
     "batch_size": 32,
     "auto_embed": false
   },
+  "translation": {
+    "enabled": true,
+    "output_dir": "auto",
+    "default_source": "auto",
+    "default_target": "ru",
+    "max_chars_per_request": 1800,
+    "auto_install_models": true,
+    "passive_enabled": true
+  },
+  "background": {
+    "enabled": true,
+    "interval_seconds": 60,
+    "auto_index": true
+  },
+  "qa": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:11434",
+    "model": "",
+    "top_k": 8,
+    "max_context_chars": 14000
+  },
   "web": {
     "host": "127.0.0.1",
     "port": 8080,
@@ -91,13 +112,5 @@
   },
   "ui": {
     "setup_complete": true
-  },
-  "translation": {
-    "enabled": true,
-    "output_dir": "auto",
-    "default_source": "auto",
-    "default_target": "ru",
-    "max_chars_per_request": 1800,
-    "auto_install_models": true
   }
 }

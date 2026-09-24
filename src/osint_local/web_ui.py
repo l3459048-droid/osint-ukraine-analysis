@@ -14,8 +14,8 @@ def _layout(title: str, body: str) -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.5</span></a><nav>
-<a href="/search">Search</a><a href="/documents">Documents</a><a href="/settings">Settings</a>
+<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.6</span></a><nav>
+<a href="/search">Search</a><a href="/ask">Ask</a><a href="/documents">Documents</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
 <footer>Local-first · source files stay on this computer</footer>
@@ -116,7 +116,7 @@ def _setup_panel(csrf_token: str, input_dir) -> str:
 </div></section>"""
 
 
-def _settings_panel(csrf_token: str, input_dir, workspace_dir, translations_dir=None, *, semantic_available: bool, semantic_enabled: bool, embedding_count: int, chunk_count: int) -> str:
+def _settings_panel(csrf_token: str, input_dir, workspace_dir, translations_dir=None, *, semantic_available: bool, semantic_enabled: bool, embedding_count: int, chunk_count: int, background_enabled: bool = True, background_interval: int = 120, passive_translation: bool = True, qa_base_url: str = "http://127.0.0.1:11434") -> str:
     index_status, _, _ = _index_state(
         semantic_available=semantic_available,
         semantic_enabled=semantic_enabled,
@@ -128,40 +128,93 @@ def _settings_panel(csrf_token: str, input_dir, workspace_dir, translations_dir=
 <form class="settings-path" action="/settings/input-dir" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><input name="input_dir" value="{_e(input_dir)}"><button class="secondary" type="submit">Save path</button></form>
 <div class="settings-row"><div><span class="setting-label">Workspace</span><strong>{_e(workspace_dir)}</strong><p>Database, extracted text and index. Managed automatically.</p></div></div>
 <div class="settings-row"><div><span class="setting-label">Semantic index</span><strong>{_e(index_status)}</strong><p>{embedding_count} embeddings for {chunk_count} chunks.</p></div></div>
-<div class="settings-row"><div><span class="setting-label">Translations</span><strong>{_e(translations_dir or "translations")}</strong><p>Offline translations are saved separately from source files.</p></div><div class="settings-actions"><form action="/actions/open-translations" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="secondary" type="submit">Open</button></form></div></div>
+<div class="settings-row"><div><span class="setting-label">Translations</span><strong>{_e(translations_dir or "translations")}</strong><p>Only English/Ukrainian → Russian. Originals are never changed.</p></div><div class="settings-actions"><form action="/actions/open-translations" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="secondary" type="submit">Open</button></form></div></div>
+<div class="settings-row"><div><span class="setting-label">Passive mode</span><strong>{"On" if background_enabled else "Off"}</strong><p>Checks the library every {int(background_interval)}s, updates the index when available, and translates at most one eligible document per cycle{"" if passive_translation else " (translation disabled)"}.</p></div></div>
+<div class="settings-row"><div><span class="setting-label">Local Q&A</span><strong>{_e(qa_base_url)}</strong><p>Questions use retrieved document fragments and a local Ollama model.</p></div></div>
 </section>"""
 
 
 def _translation_panel(csrf_token: str, sha256: str, translations, *, available: bool, pairs: set[tuple[str, str]], action: dict) -> str:
     running_here = action.get("status") == "running" and action.get("kind") == "translate"
-    pair_note = ", ".join(f"{a}→{b}" for a, b in sorted(pairs)) if pairs else "No language pairs installed"
+    useful_pairs = sorted(pair for pair in pairs if pair in {("en", "ru"), ("uk", "ru")})
+    pair_note = ", ".join(f"{a}→ru" for a, _ in useful_pairs) if useful_pairs else "EN→RU / UK→RU models not installed yet"
     disabled = " disabled" if running_here else ""
     source_options = "".join(
         f'<option value="{code}"{" selected" if code == "auto" else ""}>{label}</option>'
-        for code, label in (("auto", "Auto"), ("en", "English"), ("ru", "Russian"), ("uk", "Ukrainian"))
-    )
-    target_options = "".join(
-        f'<option value="{code}"{" selected" if code == "ru" else ""}>{label}</option>'
-        for code, label in (("en", "English"), ("ru", "Russian"), ("uk", "Ukrainian"))
+        for code, label in (("auto", "Auto"), ("en", "English"), ("uk", "Ukrainian"))
     )
     rows = []
     for row in translations:
+        if row["target_lang"] != "ru":
+            continue
         rows.append(
-            f'<a class="translation-item" href="/translation/{_e(sha256)}/{_e(row["source_lang"])}/{_e(row["target_lang"])}" target="_blank">'
-            f'<span>{_e(row["source_lang"])} → {_e(row["target_lang"])}</span><small>{_e((row["created_at"] or "")[:19])}</small></a>'
+            f'<a class="translation-item" href="/translation/{_e(sha256)}/{_e(row["source_lang"])}/ru" target="_blank">'
+            f'<span>{_e(row["source_lang"])} → ru</span><small>{_e((row["created_at"] or "")[:19])}</small></a>'
         )
-    saved = "".join(rows) if rows else '<span class="translation-empty">No saved translations yet.</span>'
+    saved = "".join(rows) if rows else '<span class="translation-empty">No Russian translation saved yet.</span>'
     availability = "Offline engine ready" if available else "Install optional offline translation support"
     status = action.get("message") if running_here else ""
     return f"""<section class="panel translation-panel" data-translation-panel>
-<div class="panel-head"><div><h2>Translate</h2><span class="panel-subtle">{_e(availability)} · {_e(pair_note)}</span></div><form action="/actions/open-translations" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="tiny-button" type="submit">Folder</button></form></div>
+<div class="panel-head"><div><h2>Translate to Russian</h2><span class="panel-subtle">{_e(availability)} · {_e(pair_note)}</span></div><form action="/actions/open-translations" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button class="tiny-button" type="submit">Folder</button></form></div>
 <form class="translation-form" action="/actions/translate" method="post">
-<input type="hidden" name="csrf" value="{_e(csrf_token)}"><input type="hidden" name="sha256" value="{_e(sha256)}">
+<input type="hidden" name="csrf" value="{_e(csrf_token)}"><input type="hidden" name="sha256" value="{_e(sha256)}"><input type="hidden" name="target_lang" value="ru">
 <label>From<select name="source_lang">{source_options}</select></label><span class="translation-arrow">→</span>
-<label>To<select name="target_lang">{target_options}</select></label><button type="submit"{disabled}>Translate</button>
+<label>To<span class="fixed-target">Russian</span></label><button type="submit"{disabled}>Translate</button>
 </form>
 <div class="translation-status">{_e(status)}</div>
 <div class="translation-list">{saved}</div>
+</section>"""
+
+
+def _ask_form(question: str) -> str:
+    return f"""<form class="ask-form" action="/ask" method="get">
+<textarea name="q" rows="3" placeholder="Ask across all documents…">{_e(question)}</textarea>
+<button type="submit">Ask</button></form>"""
+
+
+def _qa_answer(result, error: str = "", fallback_hits=None) -> str:
+    parts = []
+    if error:
+        parts.append(f'<div class="alert">{_e(error)}</div>')
+    if result is not None:
+        parts.append('<section class="panel qa-answer"><div class="panel-head"><div><h2>Answer</h2><span class="panel-subtle">Local model · ' + _e(result.model) + '</span></div></div>')
+        parts.append(f'<div class="answer-text">{_e(result.answer)}</div></section>')
+        hits = result.sources
+    else:
+        hits = fallback_hits or []
+    if hits:
+        parts.append('<section class="panel"><div class="panel-head"><h2>Sources</h2></div><div class="qa-sources">')
+        for index, hit in enumerate(hits, 1):
+            page = f" · p.{hit.page}" if hit.page is not None else ""
+            link = f'/documents/{hit.document_sha256}' + (f'?page={hit.page}#reader' if hit.page is not None else '#reader')
+            parts.append(f'<a class="qa-source" href="{link}"><b>[{index}]</b><span>{_e(hit.source_path + page)}</span></a>')
+        parts.append('</div></section>')
+    return "".join(parts)
+
+
+def _reader_panel(sha256: str, reader, source_url: str) -> str:
+    page = reader.selected
+    if page is None:
+        return '<section class="panel" id="reader"><div class="empty">No extracted text available.</div></section>'
+    index = reader.selected_index
+    prev_link = ""
+    next_link = ""
+    if index > 0:
+        prev_page = reader.pages[index - 1].page
+        prev_link = f'<a href="/documents/{sha256}' + (f'?page={prev_page}' if prev_page is not None else '') + '#reader">← Previous</a>'
+    if index + 1 < len(reader.pages):
+        next_page = reader.pages[index + 1].page
+        next_link = f'<a href="/documents/{sha256}' + (f'?page={next_page}' if next_page is not None else '') + '#reader">Next →</a>'
+    page_label = f"Page {page.page}" if page.page is not None else "Document"
+    source_link = source_url + (f'#page={page.page}' if page.page is not None else '')
+    translation = page.translation
+    if translation:
+        right = f'<pre>{_e(translation)}</pre>'
+    else:
+        right = '<div class="reader-empty">Russian translation is not ready yet. Passive translation will pick eligible EN/UK documents one at a time while the app is open.</div>'
+    return f"""<section class="panel reader-panel" id="reader">
+<div class="panel-head"><div><h2>Reader</h2><span class="panel-subtle">{_e(page_label)} · original ↔ Russian</span></div><div class="reader-nav">{prev_link}<a href="{source_link}" target="_blank" rel="noreferrer">Open source</a>{next_link}</div></div>
+<div class="reader-grid"><div><div class="reader-label">Original</div><pre>{_e(page.original)}</pre></div><div><div class="reader-label">Русский</div>{right}</div></div>
 </section>"""
 
 def _activity_details(action: dict, errors: list[dict]) -> str:
@@ -260,7 +313,7 @@ def _pagination(page: int, per_page: int, total: int, domain: str | None) -> str
 
 
 def _search_hit(hit) -> str:
-    doc_link = f'/documents/{hit.document_sha256}#chunk-{hit.chunk_index}'
+    doc_link = f'/documents/{hit.document_sha256}' + (f'?page={hit.page}#reader' if hit.page is not None else '#reader')
     source_link = f'/source/{hit.document_sha256}' + (f'#page={hit.page}' if hit.page is not None else "")
     location = hit.source_path + (f" · page {hit.page}" if hit.page is not None else "")
     snippet = _e(" ".join(hit.text.split()))
@@ -268,7 +321,7 @@ def _search_hit(hit) -> str:
 <div class="result-meta"><span class="score">{hit.score:.4f}</span><span>{_e(hit.backend)}</span><span>{_e(location)}</span></div>
 <h3><a href="{doc_link}">{_e(hit.source_path)}</a></h3>
 <p>{snippet}</p>
-<div class="result-actions"><a href="{doc_link}">Context</a><a href="{source_link}" target="_blank" rel="noreferrer">Source{f' · p.{hit.page}' if hit.page is not None else ''}</a></div>
+<div class="result-actions"><a href="{doc_link}">Read</a><a href="{source_link}" target="_blank" rel="noreferrer">Source{f' · p.{hit.page}' if hit.page is not None else ''}</a></div>
 </article>"""
 
 
@@ -327,6 +380,7 @@ CSS = r"""
 .action-panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin:0 0 18px;display:grid;grid-template-columns:minmax(180px,1fr) auto;gap:10px 18px;align-items:center}.action-copy{display:flex;align-items:baseline;gap:12px;min-width:0}.action-copy strong{font-size:16px}.action-copy span{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.action-buttons{display:flex;align-items:center;gap:8px}.action-buttons form{margin:0}.action-buttons button{font:inherit}.action-buttons .secondary{background:var(--panel2);color:var(--text);border:1px solid var(--line)}.button.ghost{background:transparent!important;color:var(--muted)!important;border:1px solid transparent!important}.button.ghost:hover{color:var(--text)!important}.action-buttons button:disabled{opacity:.45;cursor:not-allowed}.action-meta{grid-column:1/-1;color:var(--muted);font-size:12px;display:flex;gap:12px;flex-wrap:wrap}.action-hint{color:#c0cad2}.progress-track{grid-column:1/-1;height:3px;background:#1c242c;border-radius:999px;overflow:hidden}.progress-track span{display:block;height:100%;background:var(--accent);transition:width .2s ease}.progress-track.running span{width:32%!important;animation:indeterminate 1.1s ease-in-out infinite}@keyframes indeterminate{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}.activity-panel{border:1px solid var(--line);border-radius:12px;background:var(--panel);margin:18px 0}.activity-panel summary{cursor:pointer;color:var(--muted);padding:12px 15px;user-select:none}.activity-body{border-top:1px solid var(--line);padding:15px;display:grid;grid-template-columns:1fr 1fr;gap:18px}.activity-last>span{display:block;color:var(--muted);font-size:12px}.activity-last>strong{display:block;margin-top:3px}.activity-last p{color:var(--muted);margin:7px 0}.activity-result{white-space:pre-wrap;word-break:break-word;background:#0d1116;border:1px solid #202933;border-radius:8px;padding:10px;font-size:12px}.activity-errors h3{margin:0 0 8px;font-size:13px}.activity-errors ul{list-style:none;margin:0;padding:0}.activity-errors li{border-top:1px solid var(--line);padding:8px 0}.activity-errors li:first-child{border-top:0}.activity-errors li strong,.activity-errors li span{display:block}.activity-errors li span{color:var(--muted);font-size:12px;margin-top:2px}.empty.compact{padding:4px 0}.action-error{color:var(--danger)!important}
 @media(max-width:700px){.action-panel{grid-template-columns:1fr}.action-buttons{grid-column:1/-1;flex-wrap:wrap}.activity-body{grid-template-columns:1fr}}
 .setup-panel{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,1.2fr);gap:18px;align-items:center;background:linear-gradient(180deg,#121a20,var(--panel));border:1px solid #2c5365;border-radius:14px;padding:18px;margin:0 0 18px}.setup-panel h2{margin:5px 0 4px;font-size:20px}.setup-panel p,.settings-row p{margin:4px 0 0;color:var(--muted);font-size:13px}.setup-actions{display:flex;flex-direction:column;gap:8px;align-items:stretch}.setup-actions form,.settings-actions form{margin:0}.setup-actions button,.settings-panel button,.ghost-action{font:inherit;border-radius:9px;padding:10px 13px;cursor:pointer}.setup-actions button,.settings-panel button{background:var(--accent);color:#041014;border:0;font-weight:800}.setup-actions .secondary,.settings-panel .secondary{background:var(--panel2);color:var(--text);border:1px solid var(--line)}.path-form,.settings-path{display:grid;grid-template-columns:minmax(160px,1fr) auto;gap:8px}.path-form input,.settings-path input{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px 11px;font:inherit;min-width:0}.ghost-action{background:transparent;color:var(--muted);border:1px solid transparent}.ghost-action:hover{color:var(--text)}.path-note{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(620px,65vw)}.settings-panel{padding:0}.settings-row{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:17px 18px;border-top:1px solid var(--line)}.settings-row:first-child{border-top:0}.settings-row strong{display:block;overflow-wrap:anywhere}.setting-label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.settings-actions{display:flex;gap:8px;flex-shrink:0}.settings-path{padding:0 18px 17px}.action-buttons .ghost-action{padding:12px 10px}.action-buttons form:not([data-action-form]){margin:0}.panel-subtle{display:block;color:var(--muted);font-size:12px;margin-top:3px}.translation-form{display:flex;align-items:end;gap:8px;flex-wrap:wrap}.translation-form label{color:var(--muted);font-size:11px;display:flex;flex-direction:column;gap:4px}.translation-form select{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;min-width:120px}.translation-form button,.tiny-button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font:inherit;cursor:pointer}.translation-form button{background:var(--accent);color:#041014;border-color:transparent;font-weight:800}.translation-form button:disabled{opacity:.45}.translation-arrow{color:var(--muted);padding-bottom:9px}.translation-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.translation-item{border:1px solid var(--line);border-radius:9px;padding:7px 9px;text-decoration:none;color:var(--text);display:flex;gap:8px;align-items:center}.translation-item small,.translation-empty,.translation-status{color:var(--muted);font-size:12px}.translation-status{min-height:18px;margin-top:8px}@media(max-width:760px){.setup-panel{grid-template-columns:1fr}.settings-row{align-items:flex-start;flex-direction:column}.settings-actions{width:100%;flex-wrap:wrap}.path-form,.settings-path{grid-template-columns:1fr}.path-note{max-width:85vw}}
+.ask-form{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:stretch;margin:0 0 18px}.ask-form textarea{background:#0d1116;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:13px;font:inherit;resize:vertical;min-height:78px}.ask-form button{background:var(--accent);color:#041014;border:0;border-radius:10px;padding:0 22px;font:inherit;font-weight:800;cursor:pointer}.answer-text{white-space:pre-wrap;line-height:1.65}.qa-sources{display:flex;flex-direction:column}.qa-source{display:flex;gap:10px;padding:10px 0;border-top:1px solid var(--line);text-decoration:none;color:var(--text)}.qa-source:first-child{border-top:0}.qa-source b{color:var(--accent)}.reader-panel{scroll-margin-top:80px}.reader-nav{display:flex;gap:12px;flex-wrap:wrap}.reader-grid{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line)}.reader-grid>div{min-width:0;padding:14px}.reader-grid>div+div{border-left:1px solid var(--line)}.reader-grid pre{white-space:pre-wrap;word-break:break-word;line-height:1.55;margin:8px 0 0;max-height:65vh;overflow:auto}.reader-label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.reader-empty{color:var(--muted);padding:18px 0;line-height:1.5}.fixed-target{display:block;background:#0d1116;border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:120px;color:var(--text)}@media(max-width:800px){.reader-grid{grid-template-columns:1fr}.reader-grid>div+div{border-left:0;border-top:1px solid var(--line)}.ask-form{grid-template-columns:1fr}.ask-form button{padding:12px}}
 """
 
 

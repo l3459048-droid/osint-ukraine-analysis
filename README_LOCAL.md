@@ -1,41 +1,38 @@
-# OSINT Local — v0.5
+# OSINT Local — v0.6
 
-Local-first document ingestion, search and minimal desktop-like Web UI for the OSINT Ukraine Analysis fork.
+Local-first runtime for the OSINT Ukraine Analysis fork.
 
 ## Current pipeline
 
-- recursively reads a configurable local folder;
-- accepts PDF, DOCX, TXT and Markdown;
-- fingerprints content with SHA-256 and skips unchanged/duplicate files;
-- extracts embedded PDF/DOCX/TXT text;
-- optionally OCRs sparse/scanned PDF pages with local Tesseract;
-- classifies documents with configurable multilingual keywords;
-- creates page-aware overlapping chunks;
-- stores documents, classes, chunks and embeddings in SQLite;
-- supports lexical search without ML dependencies;
-- optionally builds multilingual semantic embeddings with Sentence Transformers;
-- serves a dependency-free local Web UI with Python's standard library;
-- lets the user choose/open the document folder from the UI;
-- reports semantic-index freshness as a compact status;
-- optionally translates processed documents offline with Argos Translate;
-- saves translations separately next to the source-folder tree;
-- never modifies or deletes source documents.
+- local recursive PDF/DOCX/TXT/MD ingestion;
+- SHA-256 deduplication and incremental processing;
+- embedded-text extraction plus optional local Tesseract OCR;
+- multilingual keyword classification;
+- page-aware chunking;
+- SQLite document/chunk/embedding/translation state;
+- lexical search and optional multilingual semantic search;
+- local Web UI without a web-framework dependency;
+- page-targeted search results;
+- side-by-side original/Russian reader;
+- offline EN→RU and UK→RU translation with Argos Translate;
+- passive one-document-at-a-time translation queue;
+- passive scan/index maintenance while Web UI is running;
+- local RAG Q&A through Ollama with source/page references;
+- source files remain read-only.
 
 ## Layout
 
 ```text
-<any document folder>/           <- source documents, read-only
-translations/                    <- generated translations, separate from sources
+<any document folder>/           # read-only originals
+translations/ru/                 # generated Russian translations
 workspace/
-  osint.db                       <- documents, chunks, classes, embeddings
-  text/<sha256>.txt              <- extracted text
+  osint.db
+  text/<sha256>.txt
   metadata/<sha256>.json
   logs/osint-local.log
 ```
 
 ## Install
-
-Python 3.10+:
 
 ```bash
 python -m venv .venv
@@ -44,97 +41,48 @@ python -m venv .venv
 pip install -e .
 ```
 
-Optional OCR:
+Optional layers:
 
 ```bash
 pip install -e '.[ocr]'
-```
-
-Optional semantic search:
-
-```bash
 pip install -e '.[search]'
-```
-
-Optional offline translation:
-
-```bash
 pip install -e '.[translate]'
-```
-
-Argos language models are installed per language pair. The first requested pair can be downloaded automatically; subsequent translations use the installed local model. UI v0.5 exposes English, Russian and Ukrainian.
-
-Everything:
-
-```bash
+# or
 pip install -e '.[all]'
 ```
 
-## Start
-
-The shortest first-run path is now:
+## Run
 
 ```bash
 osint-local serve
 ```
 
-If `config.json` does not exist, it is created automatically and the home page shows a small first-run folder chooser. The user can use the system folder dialog or paste a path manually. Settings remain available later from the top navigation.
+Default URL: `http://127.0.0.1:8080`.
 
-Default address:
+## Passive maintenance
 
-```text
-http://127.0.0.1:8080
-```
+When `serve` is used, the background loop periodically asks the same serialized ActionManager to:
 
-On Windows, after installation, `start_local.bat` starts the Web UI using `.venv` when present. Linux/macOS can use `./start_local.sh`.
+1. run an incremental scan;
+2. embed missing chunks if semantic search is installed;
+3. translate at most one eligible EN/UK document to Russian when the required Argos route is already installed.
 
-## Minimal UI actions
+No translation model is downloaded by the passive worker.
 
-The dashboard intentionally keeps a small action row:
+## Q&A
 
-```text
-Scan | Build/Update index | Folder | Settings
-```
+`Ask` retrieves relevant chunks from the whole current library, then sends only those grounded fragments to a local Ollama `/api/chat` endpoint. The response is shown together with source document/page links. If Ollama is unavailable, the UI still shows retrieved source fragments instead of pretending to have generated an answer.
 
-The semantic state is derived from the current chunk/embedding coverage:
-
-- `Index not built` — no embeddings yet;
-- `Index update needed` — new chunks are not embedded yet;
-- `Index current` — the configured model covers the current chunk set;
-- `Semantic unavailable` — optional Sentence Transformers dependency is not installed.
-
-Long-running Scan/Index jobs remain serialized and report compact progress through `/api/activity`.
-
-## Folder handling
-
-The selected `input_dir` is persisted to `config.json`. The server swaps to the new source folder without changing `workspace_dir`, so the database and derived artifacts stay in one predictable place.
-
-The `Folder` action opens the current source directory through the OS file manager. The native folder chooser is launched in a child Python process so GUI toolkits do not interfere with the threaded HTTP server. If tkinter is unavailable, the manual path field remains the fallback.
-
-## Semantic indexing
+CLI:
 
 ```bash
-osint-local index
-osint-local search "изменения тактики применения FPV"
+osint-local ask "question about the collection"
 ```
-
-`auto` search uses semantic ranking only when the configured model has embeddings for all current chunks. A partial/stale index falls back to lexical search until indexing completes.
-
-## API
-
-```text
-GET /api/stats
-GET /api/search?q=electronic+warfare&mode=auto&limit=10
-GET /api/activity
-```
-
 
 ## Translation
 
-Translations are generated from the already extracted text, so OCR/extraction does not need to run again. The source file stays read-only. Results are stored as Markdown under `translations/<target-language>/` and tracked in SQLite by source SHA-256 and language pair. PDF page boundaries are retained as Markdown headings.
+Only `en → ru` and `uk → ru` are accepted. Ukrainian may pivot through English when direct Argos packages are unavailable. Generated Markdown preserves PDF page headings and is stored separately from originals.
 
 ```bash
-osint-local translate <SHA256> --from auto --to ru
+osint-local translate <SHA256> --from auto
 ```
-
-The Web UI exposes the same operation on each document page.

@@ -15,14 +15,18 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from .actions import ActionBusyError, ActionManager
+from .background import BackgroundLoop
 from .config import Settings, load_settings, update_config
 from .desktop import open_folder, pick_folder
 from .pipeline import LocalPipeline
+from .qa import ask_documents, ollama_models
+from .reader import load_reader
 from .search import search_chunks
 from .translation import argos_available, installed_pairs
 from .web_ui import (
     _action_panel,
     _activity_details,
+    _ask_form,
     _category_list,
     _chunk_card,
     _classification_badges,
@@ -35,6 +39,8 @@ from .web_ui import (
     _metadata_grid,
     _page_header,
     _pagination,
+    _qa_answer,
+    _reader_panel,
     _first,
     _safe_json,
     _search_form,
@@ -52,7 +58,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, pipeline: LocalPipeline, *, folder_opener=open_folder, folder_picker=pick_folder):
+    def __init__(self, address, pipeline: LocalPipeline, *, folder_opener=open_folder, folder_picker=pick_folder, start_background: bool = False):
         super().__init__(address, DashboardHandler)
         self.pipeline = pipeline
         self.settings = pipeline.settings
@@ -60,6 +66,18 @@ class DashboardServer(ThreadingHTTPServer):
         self.csrf_token = secrets.token_urlsafe(32)
         self.folder_opener = folder_opener
         self.folder_picker = folder_picker
+        self.background = None
+        if start_background and bool(self.settings.background.get("enabled", True)):
+            self.background = BackgroundLoop(
+                self.actions,
+                interval_seconds=int(self.settings.background.get("interval_seconds", 120)),
+            )
+            self.background.start()
+
+    def server_close(self) -> None:
+        if self.background is not None:
+            self.background.stop()
+        super().server_close()
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -76,10 +94,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._search_page(query)
             elif path == "/documents":
                 self._documents_page(query)
+            elif path == "/ask":
+                self._ask_page(query)
             elif path == "/settings":
                 self._settings_page(query)
             elif path.startswith("/documents/"):
-                self._document_page(path.split("/", 2)[2])
+                self._document_page(path.split("/", 2)[2], query)
             elif path.startswith("/source/"):
                 self._source(path.split("/", 2)[2], head_only=False)
             elif path.startswith("/translation/"):
@@ -218,6 +238,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             content.append("</section>")
         self._html(f"Search — {q}" if q else "Search", "".join(content))
 
+    def _ask_page(self, query: dict[str, list[str]]) -> None:
+        question = _first(query, "q").strip()
+        result = None
+        error = ""
+        fallback = []
+        if question:
+            try:
+                result = ask_documents(self.db, question, self.settings.search, self.settings.qa)
+            except RuntimeError as exc:
+                error = str(exc)
+                try:
+                    fallback = search_chunks(
+                        self.db, question, self.settings.search,
+                        limit=int(self.settings.qa.get("top_k", 8)), mode="auto",
+                    )
+                except RuntimeError:
+                    fallback = []
+        body = [
+            _page_header("Ask", "Ask a local model about the entire indexed document library."),
+            _ask_form(question),
+        ]
+        if question:
+            body.append(_qa_answer(result, error, fallback))
+        else:
+            body.append('<div class="empty">Answers are grounded in retrieved document fragments. Ollama stays local on this computer.</div>')
+        self._html("Ask", "".join(body))
+
     def _documents_page(self, query: dict[str, list[str]]) -> None:
         domain = _first(query, "domain").strip() or None
         try:
@@ -252,11 +299,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 semantic_enabled=bool(self.settings.search.get("semantic_enabled", True)),
                 embedding_count=stats["embedding_count"],
                 chunk_count=stats["chunks"],
+                background_enabled=bool(self.settings.background.get("enabled", True)),
+                background_interval=int(self.settings.background.get("interval_seconds", 120)),
+                passive_translation=bool(self.settings.translation.get("passive_enabled", True)),
+                qa_base_url=str(self.settings.qa.get("base_url") or "http://127.0.0.1:11434"),
             ),
         ]
         self._html("Settings", "".join(body))
 
-    def _document_page(self, sha256: str) -> None:
+    def _document_page(self, sha256: str, query: dict[str, list[str]]) -> None:
         if not SHA_RE.fullmatch(sha256):
             self._error(HTTPStatus.NOT_FOUND, "Document not found")
             return
@@ -268,6 +319,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         chunks = self.db.chunks_for_document(sha256, limit=1000)
         source_url = f"/source/{quote(sha256)}"
         metadata = _safe_json(doc["metadata_json"])
+        try:
+            requested_page = int(_first(query, "page")) if _first(query, "page") else None
+        except ValueError:
+            requested_page = None
+        reader = load_reader(self.settings, self.db, sha256, requested_page)
 
         body = [
             _page_header(doc["source_path"], f"SHA-256 {sha256[:16]}…"),
@@ -287,6 +343,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             '<section class="panel"><div class="panel-head"><h2>Metadata</h2></div>',
             _metadata_grid(metadata, doc),
             "</section>",
+            _reader_panel(sha256, reader, source_url),
             _translation_panel(
                 self.server.csrf_token,
                 sha256,
@@ -406,9 +463,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._action_response({"error": "Document not found"}, status=HTTPStatus.NOT_FOUND)
             return
         source_lang = data.get("source_lang", "auto")
-        target_lang = data.get("target_lang", "en")
-        if source_lang not in {"auto", "en", "ru", "uk"} or target_lang not in {"en", "ru", "uk"}:
-            self._action_response({"error": "Unsupported language"}, status=HTTPStatus.BAD_REQUEST)
+        target_lang = "ru"
+        if source_lang not in {"auto", "en", "uk"}:
+            self._action_response({"error": "Translation is limited to English/Ukrainian → Russian"}, status=HTTPStatus.BAD_REQUEST)
             return
         if not argos_available():
             self._action_response({"error": "Offline translation is not installed. Install: pip install -e '.[translate]'"}, status=HTTPStatus.BAD_REQUEST)
@@ -624,8 +681,12 @@ def create_server(
     *,
     folder_opener=open_folder,
     folder_picker=pick_folder,
+    start_background: bool = False,
 ) -> DashboardServer:
-    return DashboardServer((host, port), pipeline, folder_opener=folder_opener, folder_picker=folder_picker)
+    return DashboardServer(
+        (host, port), pipeline, folder_opener=folder_opener, folder_picker=folder_picker,
+        start_background=start_background,
+    )
 
 
 def serve(
@@ -635,7 +696,7 @@ def serve(
     port: int = 8080,
     open_browser: bool = True,
 ) -> None:
-    server = create_server(pipeline, host, port)
+    server = create_server(pipeline, host, port, start_background=True)
     actual_host, actual_port = server.server_address[:2]
     browser_host = "127.0.0.1" if actual_host in {"0.0.0.0", "::"} else actual_host
     url = f"http://{browser_host}:{actual_port}"

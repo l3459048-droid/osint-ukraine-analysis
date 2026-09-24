@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -7,7 +8,7 @@ from typing import Any, Callable
 
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
-from .translation import translate_document
+from .translation import next_passive_translation, translate_document
 
 
 class ActionBusyError(RuntimeError):
@@ -55,8 +56,11 @@ class ActionManager:
     def start_index(self) -> dict[str, Any]:
         return self._start("index", self._run_index)
 
-    def start_translate(self, sha256: str, source_lang: str, target_lang: str) -> dict[str, Any]:
+    def start_translate(self, sha256: str, source_lang: str, target_lang: str = "ru") -> dict[str, Any]:
         return self._start("translate", lambda: self._run_translate(sha256, source_lang, target_lang))
+
+    def start_maintenance(self) -> dict[str, Any]:
+        return self._start("maintenance", self._run_maintenance)
 
     def _start(self, kind: str, target: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
@@ -89,7 +93,12 @@ class ActionManager:
             return
         with self._lock:
             self._state.status = "succeeded"
-            labels = {"scan": "Scan complete", "index": "Index complete", "translate": "Translation complete"}
+            labels = {
+                "scan": "Scan complete",
+                "index": "Index complete",
+                "translate": "Translation complete",
+                "maintenance": "Background check complete",
+            }
             self._state.message = labels.get(self._state.kind, "Action complete")
             self._state.result = result
             self._state.finished_at = _now()
@@ -140,6 +149,46 @@ class ActionManager:
             target_lang=target_lang,
             progress=progress,
         )
+
+    def _run_maintenance(self) -> dict[str, Any]:
+        counts: dict[str, int] = {}
+
+        def scan_progress(current: int, total: int, result: ProcessResult | None) -> None:
+            if result is not None:
+                counts[result.status] = counts.get(result.status, 0) + 1
+                label = f"Checking {result.path.name}"
+            else:
+                label = "Checking document folder…"
+            self._progress(current, total, label)
+
+        results = self.pipeline.scan(progress=scan_progress)
+        embedded = 0
+        settings = self.pipeline.settings
+        if (
+            bool(settings.background.get("auto_index", True))
+            and bool(settings.search.get("semantic_enabled", True))
+            and importlib.util.find_spec("sentence_transformers") is not None
+        ):
+            self._progress(0, 0, "Updating semantic index…")
+            embedded = self.index_builder(self.pipeline.db, settings.search)
+
+        translated = None
+        if bool(settings.translation.get("passive_enabled", True)):
+            self._progress(0, 0, "Checking translation queue…")
+            translated = next_passive_translation(
+                settings,
+                self.pipeline.db,
+                progress=lambda current, total, message: self._progress(current, total, message),
+            )
+
+        if not results and not embedded and not translated:
+            self._progress(0, 0, "Library is up to date")
+        return {
+            "files_seen": len(results),
+            "counts": counts,
+            "embedded_chunks": embedded,
+            "translated": translated["source_path"] if translated else None,
+        }
 
     def _progress(self, current: int, total: int, message: str) -> None:
         with self._lock:
