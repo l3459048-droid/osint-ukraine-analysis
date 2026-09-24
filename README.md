@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.4
+# OSINT Ukraine Analysis — local-first v0.9.5
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.4
+## Что делает v0.9.5
 
 ```text
 папка документов
@@ -99,7 +99,11 @@ osint-local translate <SHA256> --from auto
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
 
-## Fast Translation v0.9.4
+## Fast Translation v0.9.5
+
+### Tokenizer self-repair
+
+If a previous Fast Translation setup already produced the converted CTranslate2 weights but missed `source.spm` or `target.spm`, pressing **Prepare** now repairs only the missing tokenizer assets from the OPUS-MT model. The existing INT8 `model.bin` is kept and is not converted again.
 
 ### UTF-8 translation rendering
 
