@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import re
 import secrets
+import shutil
 import threading
 import webbrowser
 from dataclasses import asdict
@@ -16,13 +17,13 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .actions import ActionBusyError, ActionManager
 from .background import BackgroundLoop
-from .config import Settings, load_settings, update_config
+from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
 from .pipeline import LocalPipeline
 from .qa import ask_documents, ollama_models
 from .reader import load_reader
 from .search import search_chunks
-from .translation import argos_available, installed_pairs
+from .translation import argos_available, installed_pairs, translation_queue_status
 from .web_ui import (
     _action_panel,
     _activity_details,
@@ -46,6 +47,7 @@ from .web_ui import (
     _search_form,
     _search_hit,
     _settings_panel,
+    _system_panel,
     _setup_panel,
     _stat_card,
     _translation_panel,
@@ -203,6 +205,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._ask_page(query)
             elif path == "/settings":
                 self._settings_page(query)
+            elif path == "/system":
+                self._system_page(query)
             elif path.startswith("/documents/"):
                 self._document_page(path.split("/", 2)[2], query)
             elif path.startswith("/source/"):
@@ -215,6 +219,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json(self.server.ask.snapshot())
             elif path == "/api/stats":
                 self._json(self._stats_payload())
+            elif path == "/api/system":
+                self._json(self._system_payload())
             elif path == "/api/activity":
                 self._json(self._activity_payload())
             else:
@@ -245,6 +251,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._start_ask_action()
             elif path == "/settings/input-dir":
                 self._set_input_dir_action()
+            elif path == "/settings/performance":
+                self._set_performance_action()
             elif path == "/settings/pick-folder":
                 self._pick_folder_action()
             else:
@@ -397,9 +405,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 background_interval=int(self.settings.background.get("interval_seconds", 120)),
                 passive_translation=bool(self.settings.translation.get("passive_enabled", True)),
                 qa_base_url=str(self.settings.qa.get("base_url") or "http://127.0.0.1:11434"),
+                performance_profile=str(self.settings.performance.get("profile") or "economy"),
+                performance_profiles=PERFORMANCE_PROFILES,
             ),
         ]
         self._html("Settings", "".join(body))
+
+    def _system_page(self, query: dict[str, list[str]]) -> None:
+        status = self._system_payload()
+        body = [
+            _page_header("System", "Local processing status, queues and runtime dependencies."),
+            _system_panel(status, self.server.csrf_token),
+            _activity_details(self.server.actions.snapshot(), self.db.recent_errors(limit=8)),
+        ]
+        self._html("System", "".join(body))
 
     def _document_page(self, sha256: str, query: dict[str, list[str]]) -> None:
         if not SHA_RE.fullmatch(sha256):
@@ -484,6 +503,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "translations_ru": int(raw.get("translations_ru", 0)),
             "errors": int(raw.get("errors", 0)),
             "categories": self.db.category_counts(),
+        }
+
+    def _system_payload(self) -> dict:
+        stats = self._stats_payload()
+        semantic_available = importlib.util.find_spec("sentence_transformers") is not None
+        pairs = installed_pairs() if argos_available() else set()
+        queue = translation_queue_status(
+            self.settings,
+            self.db,
+            available_pairs=pairs,
+            limit=1000,
+        )
+        try:
+            models = ollama_models(
+                str(self.settings.qa.get("base_url") or "http://127.0.0.1:11434"),
+                timeout=0.75,
+            )
+            ollama_reachable = True
+            ollama_error = ""
+        except RuntimeError as exc:
+            models = []
+            ollama_reachable = False
+            ollama_error = str(exc)
+        profile = str(self.settings.performance.get("profile") or "economy")
+        profile_info = PERFORMANCE_PROFILES.get(profile, {})
+        return {
+            **stats,
+            "semantic_available": semantic_available,
+            "index_pending": max(0, int(stats["chunks"]) - int(stats["embedding_count"])),
+            "translation_queue": queue,
+            "argos_available": argos_available(),
+            "ollama_reachable": ollama_reachable,
+            "ollama_error": ollama_error,
+            "ollama_models": models,
+            "ollama_configured_model": str(self.settings.qa.get("model") or ""),
+            "tesseract": shutil.which("tesseract"),
+            "background_enabled": bool(self.settings.background.get("enabled", True)),
+            "background_interval": int(self.settings.background.get("interval_seconds", 60)),
+            "performance_profile": profile,
+            "performance_label": profile_info.get("label", profile.title()),
+            "action": self.server.actions.snapshot(),
         }
 
     def _activity_payload(self) -> dict:
@@ -599,6 +659,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Location", f"/documents/{sha256}")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def _set_performance_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response(
+                {"error": "Invalid action token. Refresh the page and try again."},
+                status=HTTPStatus.FORBIDDEN,
+            )
+            return
+        profile = data.get("profile", "").strip().casefold()
+        try:
+            patch = performance_profile_patch(profile)
+        except ValueError as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        update_config(self.settings.config_path, patch)
+        settings = load_settings(self.settings.config_path)
+        self.server.pipeline.settings = settings
+        self.server.settings = settings
+        if self.server.background is not None:
+            self.server.background.interval_seconds = max(
+                15, int(settings.background.get("interval_seconds", 60))
+            )
+        self._action_response(
+            {
+                "ok": True,
+                "profile": profile,
+                "label": PERFORMANCE_PROFILES[profile]["label"],
+            },
+            status=HTTPStatus.OK,
+        )
 
     def _set_input_dir_action(self) -> None:
         data = self._form_data()
