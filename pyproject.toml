@@ -28,9 +28,9 @@ all = [
   "pytesseract>=0.3.13,<1",
   "sentence-transformers>=6,<7",
   "argostranslate>=1.9,<2",
-  "ctranslate2>=4.6,<5",
+  "ctranslate2>=4.7,<5",
   "sentencepiece>=0.2,<1",
-  "transformers>=4.44,<5",
+  "transformers>=5,<6",
   "torch>=2.2,<3",
 ]
 dev = ["pytest>=8,<10"]
