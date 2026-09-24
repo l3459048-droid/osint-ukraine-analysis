@@ -62,7 +62,7 @@ def test_processed_text_is_searchable_lexically(tmp_path: Path):
         assert processed.status == "processed"
         hits = search_chunks(
             pipeline.db,
-            "FPV logistics",
+            "FPV drone logistics",
             settings.search,
             mode="lexical",
         )
@@ -144,7 +144,7 @@ def test_hybrid_search_fuses_semantic_and_lexical_rankings(tmp_path: Path):
         "Unmanned aircraft tactics in forward operations.", encoding="utf-8"
     )
     (settings.input_dir / "lexical.txt").write_text(
-        "FPV logistics note with unrelated filler.", encoding="utf-8"
+        "Logistics note with unrelated filler.", encoding="utf-8"
     )
 
     pipeline = LocalPipeline(settings)
