@@ -34,7 +34,11 @@ PERFORMANCE_PROFILES = {
         "label": "Economy",
         "description": "Lowest background and Q&A memory pressure.",
         "search": {"batch_size": 12},
-        "translation": {"max_per_cycle": 1},
+        "translation": {
+            "max_per_cycle": 1,
+            "fast_batch_tokens": 2048,
+            "fast_text_batch": 16,
+        },
         "background": {"interval_seconds": 90},
         "qa": {
             "top_k": 5,
@@ -49,7 +53,11 @@ PERFORMANCE_PROFILES = {
         "label": "Balanced",
         "description": "Faster follow-up questions and background processing.",
         "search": {"batch_size": 32},
-        "translation": {"max_per_cycle": 2},
+        "translation": {
+            "max_per_cycle": 2,
+            "fast_batch_tokens": 4096,
+            "fast_text_batch": 32,
+        },
         "background": {"interval_seconds": 60},
         "qa": {
             "top_k": 6,
@@ -92,6 +100,7 @@ DEFAULT_CONFIG = {
     },
     "translation": {
         "enabled": True,
+        "engine": "fast",
         "output_dir": "auto",
         "default_source": "auto",
         "default_target": "ru",
@@ -99,6 +108,13 @@ DEFAULT_CONFIG = {
         "auto_install_models": True,
         "passive_enabled": True,
         "max_per_cycle": 1,
+        "fast_compute_type": "int8",
+        "fast_batch_tokens": 2048,
+        "fast_text_batch": 16,
+        "fast_max_input_tokens": 220,
+        "fast_inter_threads": 0,
+        "fast_intra_threads": 0,
+        "benchmark_chars_per_page": 1800,
     },
     "background": {
         "enabled": True,
