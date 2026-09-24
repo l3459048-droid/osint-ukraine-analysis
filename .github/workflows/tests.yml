@@ -9,6 +9,10 @@ on:
       - main
       - local-ingestion-v1
 
+concurrency:
+  group: test-local-osint-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
