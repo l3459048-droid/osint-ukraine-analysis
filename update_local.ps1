@@ -49,6 +49,7 @@ try {
         "stop_local.bat",
         "START_OSINT.pyw",
         "STOP_OSINT.pyw",
+        "UPDATE_OSINT.cmd",
         "update_local.ps1"
     )
     foreach ($File in $Files) {
