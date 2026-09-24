@@ -697,6 +697,31 @@ def serve(
     open_browser: bool = True,
 ) -> None:
     server = create_server(pipeline, host, port, start_background=True)
+    stop_file = pipeline.settings.project_root / ".osint-stop"
+    try:
+        stop_file.unlink()
+    except FileNotFoundError:
+        pass
+
+    stop_watcher_done = threading.Event()
+
+    def watch_stop_file() -> None:
+        while not stop_watcher_done.wait(0.5):
+            if not stop_file.exists():
+                continue
+            try:
+                stop_file.unlink()
+            except OSError:
+                pass
+            server.shutdown()
+            return
+
+    threading.Thread(
+        target=watch_stop_file,
+        name="osint-local-stop-watcher",
+        daemon=True,
+    ).start()
+
     actual_host, actual_port = server.server_address[:2]
     browser_host = "127.0.0.1" if actual_host in {"0.0.0.0", "::"} else actual_host
     url = f"http://{browser_host}:{actual_port}"
@@ -709,5 +734,10 @@ def serve(
     except KeyboardInterrupt:
         pass
     finally:
+        stop_watcher_done.set()
+        try:
+            stop_file.unlink()
+        except FileNotFoundError:
+            pass
         server.server_close()
 
