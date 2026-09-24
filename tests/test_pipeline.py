@@ -108,13 +108,9 @@ def test_pipeline_can_process_from_worker_thread(tmp_path: Path):
 
 
 def test_chunking_preserves_page_numbers():
-    pages = [
-        {"page": 1, "text": "Alpha " * 80},
-        {"page": 2, "text": "Bravo " * 80},
-    ]
+    text = "--- PAGE 1 ---\n" + ("Alpha " * 80) + "\n\n--- PAGE 2 ---\n" + ("Bravo " * 80)
     chunks = build_chunks(
-        pages,
-        "",
+        text,
         {"chunk_chars": 220, "overlap_chars": 30, "min_chunk_chars": 20},
     )
     assert len(chunks) >= 4
@@ -756,5 +752,30 @@ def test_background_maintenance_scans_without_parallel_user_action(tmp_path: Pat
             state = manager.snapshot()
         assert state["status"] == "succeeded"
         assert pipeline.db.document_count() == 1
+    finally:
+        pipeline.close()
+
+
+def test_failed_document_is_retried_on_next_scan(tmp_path: Path):
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "retry.txt"
+    source.write_text("fpv retry test", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    try:
+        stat = source.stat()
+        sha256 = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
+        pipeline.db.upsert_processing(
+            sha256=sha256,
+            source_path="retry.txt",
+            source_size=stat.st_size,
+            source_mtime_ns=stat.st_mtime_ns,
+            extension=".txt",
+        )
+        pipeline.db.mark_error(sha256, "synthetic failure")
+        assert pipeline.db.find_current_source("retry.txt", stat.st_size, stat.st_mtime_ns) is None
+        result = pipeline.process_file(source)
+        assert result.status == "processed"
     finally:
         pipeline.close()
