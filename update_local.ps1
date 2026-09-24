@@ -47,9 +47,9 @@ try {
         "config.example.json",
         "start_local.bat",
         "stop_local.bat",
-        "START_OSINT.vbs",
-        "STOP_OSINT.vbs",
-        "UPDATE_OSINT.vbs"
+        "START_OSINT.pyw",
+        "STOP_OSINT.pyw",
+        "update_local.ps1"
     )
     foreach ($File in $Files) {
         $From = Join-Path $SourcePath $File
@@ -78,7 +78,7 @@ try {
 
     Write-Step "Update complete"
     Write-Host "Your config.json, workspace, documents and .venv were preserved." -ForegroundColor Green
-    Write-Host "Start the app with START_OSINT.vbs."
+    Write-Host "Start the app with START_OSINT.pyw."
 }
 catch {
     Write-Host ""
