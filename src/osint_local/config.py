@@ -100,7 +100,7 @@ DEFAULT_CONFIG = {
     },
     "translation": {
         "enabled": True,
-        "engine": "fast",
+        "engine": "auto",
         "output_dir": "auto",
         "default_source": "auto",
         "default_target": "ru",
