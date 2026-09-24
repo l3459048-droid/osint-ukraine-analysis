@@ -72,14 +72,25 @@ def ask_documents(
     )
     user = f"Вопрос:\n{question}\n\nФрагменты документов:\n" + "\n".join(context_parts)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    answer = (chat_client or _ollama_chat)(base_url, model, messages).strip()
+    if chat_client is not None:
+        answer = chat_client(base_url, model, messages).strip()
+    else:
+        answer = _ollama_chat(base_url, model, messages, qa_config).strip()
     if not answer:
         raise RuntimeError("The local model returned an empty answer")
     return QAResult(question, answer, model, selected)
 
 
-def _ollama_chat(base_url: str, model: str, messages: list[dict[str, str]]) -> str:
-    payload = json.dumps({"model": model, "messages": messages, "stream": False}).encode("utf-8")
+def _ollama_chat(base_url: str, model: str, messages: list[dict[str, str]], qa_config: dict) -> str:
+    num_ctx = max(2048, int(qa_config.get("num_ctx", 4096)))
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "think": bool(qa_config.get("think", False)),
+        "keep_alive": qa_config.get("keep_alive", 0),
+        "options": {"num_ctx": num_ctx},
+    }).encode("utf-8")
     req = request.Request(
         base_url.rstrip("/") + "/api/chat",
         data=payload,

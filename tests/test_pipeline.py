@@ -83,6 +83,10 @@ def test_default_config_contains_domains_and_search(tmp_path: Path):
     assert "Drones" in settings.classification["domains"]
     assert settings.search["semantic_enabled"] is True
     assert settings.search["chunk_chars"] > settings.search["overlap_chars"]
+    assert settings.qa["model"] == "qwen3:1.7b"
+    assert settings.qa["num_ctx"] == 4096
+    assert settings.qa["think"] is False
+    assert settings.qa["keep_alive"] == 0
 
 
 def test_pipeline_can_process_from_worker_thread(tmp_path: Path):

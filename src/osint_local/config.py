@@ -66,9 +66,12 @@ DEFAULT_CONFIG = {
     "qa": {
         "enabled": True,
         "base_url": "http://127.0.0.1:11434",
-        "model": "",
-        "top_k": 8,
-        "max_context_chars": 14000,
+        "model": "qwen3:1.7b",
+        "top_k": 6,
+        "max_context_chars": 8000,
+        "num_ctx": 4096,
+        "think": False,
+        "keep_alive": 0,
     },
     "web": {
         "host": "127.0.0.1",
