@@ -42,6 +42,7 @@ PERFORMANCE_PROFILES = {
             "num_ctx": 4096,
             "think": False,
             "keep_alive": 0,
+            "chat_history_chars": 6000,
         },
     },
     "balanced": {
@@ -56,6 +57,7 @@ PERFORMANCE_PROFILES = {
             "num_ctx": 4096,
             "think": False,
             "keep_alive": "5m",
+            "chat_history_chars": 9000,
         },
     },
 }
@@ -113,6 +115,7 @@ DEFAULT_CONFIG = {
         "num_ctx": 4096,
         "think": False,
         "keep_alive": 0,
+        "chat_history_chars": 6000,
     },
     "web": {
         "host": "127.0.0.1",
