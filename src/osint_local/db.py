@@ -183,7 +183,7 @@ class Database:
             return self.conn.execute(
                 """SELECT * FROM documents
                    WHERE source_path = ? AND source_size = ? AND source_mtime_ns = ?
-                     AND pipeline_version >= 2
+                     AND pipeline_version >= 2 AND status='done'
                    ORDER BY id DESC LIMIT 1""",
                 (source_path, size, mtime_ns),
             ).fetchone()
