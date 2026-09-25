@@ -162,6 +162,8 @@
     "label_with_ollama": true,
     "label_language": "en",
     "label_batch_size": 8,
-    "max_llm_labels": 60
+    "max_llm_labels": 60,
+    "topic_label_reuse_similarity": 0.88,
+    "category_label_reuse_similarity": 0.82
   }
 }
