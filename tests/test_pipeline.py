@@ -364,6 +364,11 @@ def test_web_ui_process_now_action_csrf_and_activity(tmp_path: Path):
     from osint_local.web import create_server
 
     settings = load_settings(make_config(tmp_path))
+    # This test exercises the HTTP maintenance/CSRF flow, not optional ML
+    # indexing or passive translation. Keep it deterministic even when the
+    # full optional dependency stack is installed (as on the Windows CI job).
+    settings.background["auto_index"] = False
+    settings.translation["passive_enabled"] = False
     settings.input_dir.mkdir(parents=True)
     (settings.input_dir / "from-ui.txt").write_text("fpv drone logistics " * 20, encoding="utf-8")
 
