@@ -521,10 +521,14 @@ def _assign_documents_to_taxonomy(
         "category_assignments": category_assignments,
         "assigned_documents": assigned_documents,
         "topic_document_counts": {
-            key: len(values) for key, values in topic_documents.items()
+            topic["key"]: len(topic_documents.get(topic["key"], set()))
+            for topic in topic_records
         },
         "category_document_counts": {
-            key: len(values) for key, values in category_documents.items()
+            category["key"]: len(
+                category_documents.get(category["key"], set())
+            )
+            for category in category_records
         },
         "assignment_threshold": assignment_threshold,
         "max_topics_per_document": max_topics_per_document,
