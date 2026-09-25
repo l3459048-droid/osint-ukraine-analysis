@@ -591,13 +591,33 @@ def _taxonomy_panel(
             details = {}
 
     coverage = float(details.get("coverage") or 0.0)
+    unassigned = int(details.get("unassigned_documents") or 0)
+    refresh_mode = str(details.get("last_refresh_mode") or "full")
+    growth = int(details.get("growth_since_discovery") or 0)
+    growth_trigger = int(details.get("growth_trigger") or 0)
+    unassigned_trigger = int(details.get("unassigned_trigger") or 0)
+    refresh_count = int(
+        details.get("incremental_refreshes_since_discovery") or 0
+    )
+    refresh_limit = int(details.get("incremental_refresh_limit") or 0)
     latest_text = (
         str(latest_run["finished_at"] or latest_run["started_at"] or "")
         if latest_run else "Not built yet"
     )
     status = action.get("message") if running else (
-        f"Last rebuild: {latest_text}" if latest_run else "Build the semantic index, then rebuild taxonomy."
+        f"Last full discovery: {latest_text}" if latest_run
+        else "Build the semantic index, then rebuild taxonomy."
     )
+    cycle_parts = []
+    if latest_run:
+        cycle_parts.append(f"mode {refresh_mode}")
+        if growth_trigger:
+            cycle_parts.append(f"growth {growth}/{growth_trigger}")
+        if unassigned_trigger:
+            cycle_parts.append(f"unassigned {unassigned}/{unassigned_trigger}")
+        if refresh_limit:
+            cycle_parts.append(f"refreshes {refresh_count}/{refresh_limit}")
+    cycle_status = " · ".join(cycle_parts)
 
     category_rows = []
     for row in categories:
@@ -625,12 +645,13 @@ def _taxonomy_panel(
 {_stat_card("Adaptive categories", counts.get("categories", 0))}
 {_stat_card("Discovered topics", counts.get("topics", 0))}
 {_stat_card("Assigned documents", counts.get("assigned_documents", 0))}
+{_stat_card("Unassigned", unassigned)}
 {_stat_card("Coverage", f"{coverage * 100:.1f}%")}
 </section>
 <section class="panel">
-<div class="panel-head"><div><h2>Adaptive Corpus Taxonomy</h2><span class="panel-subtle">{_e(status)}</span></div>
+<div class="panel-head"><div><h2>Adaptive Corpus Taxonomy</h2><span class="panel-subtle">{_e(status)}{(" · " + _e(cycle_status)) if cycle_status else ""}</span></div>
 <form action="/actions/taxonomy" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{disabled}>Rebuild taxonomy</button></form></div>
-<div class="ask-filter-note">Categories and topics are discovered from document-level semantic embeddings. Rebuilds do not re-run OCR, PDF extraction or translation. Local Qwen names clusters when available; deterministic keyword labels are used as fallback.</div>
+<div class="ask-filter-note">Categories and topics are discovered from document-level semantic embeddings. New documents are assigned incrementally when they match existing topics; full discovery runs only after enough corpus growth, novel unassigned documents, major shrinkage, or the periodic refresh limit. OCR, PDF extraction and translation are not re-run. Local Qwen names new clusters when available; deterministic keyword labels are used as fallback.</div>
 </section>
 <section class="panel"><div class="panel-head"><h2>Categories</h2><span class="panel-subtle">Broad semantic groups</span></div><div class="filters">{categories_html}</div></section>
 <section class="panel"><div class="panel-head"><h2>Topics</h2><span class="panel-subtle">More specific discovered themes</span></div><div class="badges">{topics_html}</div></section>
