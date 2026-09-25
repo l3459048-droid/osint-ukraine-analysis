@@ -39,14 +39,33 @@ def _stat_card(label, value) -> str:
     return f'<div class="stat"><div class="stat-value">{_e(value)}</div><div class="stat-label">{_e(label)}</div></div>'
 
 
-def _search_form(q: str, mode: str, limit: int) -> str:
+def _search_form(
+    q: str,
+    mode: str,
+    limit: int,
+    *,
+    taxonomy_categories=None,
+    taxonomy_topics=None,
+    selected_category: str = "",
+    selected_topic: str = "",
+) -> str:
     options = "".join(
         f'<option value="{name}"{" selected" if name == mode else ""}>{label}</option>'
         for name, label in (("auto", "Auto"), ("hybrid", "Hybrid"), ("lexical", "Lexical"), ("semantic", "Semantic"))
     )
+    category_options = '<option value="">All categories</option>' + "".join(
+        f'<option value="{_e(row["category_key"])}"{" selected" if str(row["category_key"]) == selected_category else ""}>{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in (taxonomy_categories or [])
+    )
+    topic_options = '<option value="">All topics</option>' + "".join(
+        f'<option value="{_e(row["topic_key"])}"{" selected" if str(row["topic_key"]) == selected_topic else ""}>{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in (taxonomy_topics or [])
+    )
     return f"""<form class="search-form" action="/search" method="get">
 <input name="q" value="{_e(q)}" placeholder="Search documents…" autofocus>
 <select name="mode">{options}</select>
+<select name="taxonomy_category" aria-label="Adaptive category">{category_options}</select>
+<select name="taxonomy_topic" aria-label="Topic">{topic_options}</select>
 <input class="limit" name="limit" type="number" min="1" max="100" value="{int(limit)}" aria-label="Limit">
 <button type="submit">Search</button></form>"""
 
