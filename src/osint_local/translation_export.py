@@ -8,7 +8,7 @@ from docx.enum.text import WD_BREAK
 from docx.shared import Pt
 
 
-PAGE_HEADING_RE = re.compile(r"^## Page (\\d+)\\s*$", re.MULTILINE)
+PAGE_HEADING_RE = re.compile(r"^## Page (\d+)\s*$", re.MULTILINE)
 
 
 def export_translation_docx(
