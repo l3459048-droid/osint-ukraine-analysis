@@ -2611,3 +2611,20 @@ def test_web_can_prepare_quality_translation_model(tmp_path: Path, monkeypatch):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_protected_literals_preserve_multiplicity_but_not_translatable_yekts():
+    from osint_local.translation_literals import (
+        extract_protected_literals,
+        missing_protected_literals,
+    )
+
+    source = "У 2026 році програма J3 має 240 кредитів ЄКТС; перегляд у 2026 році."
+    literals = extract_protected_literals(source)
+
+    assert literals.count("2026") == 2
+    assert "J3" in literals
+    assert "240" in literals
+    assert "ЄКТС" not in literals
+    assert missing_protected_literals(source, "В 2026 году программа J3 имеет 240 кредитов ЕКТС.") == ("2026",)
