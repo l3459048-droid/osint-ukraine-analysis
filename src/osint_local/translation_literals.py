@@ -67,7 +67,12 @@ def restore_literals(protection: LiteralProtection, translated: str) -> tuple[st
     if not protection.literals:
         return value, True
 
-    if not all(item.placeholder in value for item in protection.literals):
+    positions: list[int] = []
+    for item in protection.literals:
+        if value.count(item.placeholder) != 1:
+            return value, False
+        positions.append(value.index(item.placeholder))
+    if positions != sorted(positions) or len(set(positions)) != len(positions):
         return value, False
 
     for item in protection.literals:
