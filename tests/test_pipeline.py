@@ -87,6 +87,8 @@ def test_default_config_contains_domains_and_search(tmp_path: Path):
     assert settings.qa["num_ctx"] == 4096
     assert settings.qa["think"] is False
     assert settings.qa["keep_alive"] == 0
+    assert settings.taxonomy["enabled"] is True
+    assert settings.taxonomy["auto_rebuild"] is True
 
 
 def test_pipeline_can_process_from_worker_thread(tmp_path: Path):
@@ -3145,4 +3147,168 @@ def test_web_layout_pdf_export_route_returns_pdf(tmp_path: Path, monkeypatch):
             server.server_close()
         if thread is not None:
             thread.join(timeout=5)
+        pipeline.close()
+
+
+
+def test_adaptive_taxonomy_discovers_topics_and_categories(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import build_adaptive_taxonomy, taxonomy_is_stale
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.taxonomy["min_documents"] = 4
+    settings.taxonomy["min_topic_documents"] = 2
+    settings.taxonomy["topic_similarity"] = 0.80
+    settings.taxonomy["topic_merge_similarity"] = 0.95
+    settings.taxonomy["category_similarity"] = 0.80
+    settings.taxonomy["category_merge_similarity"] = 0.95
+    settings.taxonomy["label_with_ollama"] = False
+
+    documents = {
+        "drone-a.txt": ("FPV drone reconnaissance and unmanned aircraft.", [1.0, 0.0, 0.0]),
+        "drone-b.txt": ("Drone teams and UAV operations.", [0.98, 0.05, 0.0]),
+        "drone-c.txt": ("FPV unmanned systems and drone logistics.", [0.97, 0.02, 0.0]),
+        "tourism-a.txt": ("Tourism education accreditation and curriculum.", [0.0, 1.0, 0.0]),
+        "tourism-b.txt": ("Bachelor tourism programme and ECTS curriculum.", [0.02, 0.98, 0.0]),
+        "tourism-c.txt": ("Tourism and recreation educational programme.", [0.0, 0.97, 0.03]),
+    }
+
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = {}
+        for name, (text_value, vector) in documents.items():
+            path = settings.input_dir / name
+            path.write_text(text_value, encoding="utf-8")
+            result = pipeline.process_file(path)
+            processed[name] = result.sha256
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            normalized = _normalize_vector(vector)
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        len(normalized),
+                        _vector_to_blob(normalized),
+                    )
+                ]
+            )
+
+        assert taxonomy_is_stale(pipeline.db, settings.search) is True
+
+        result = build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+
+        assert result["topics"] == 2
+        assert result["categories"] == 2
+        assert result["assigned_documents"] == 6
+        assert result["coverage"] == 1.0
+        assert taxonomy_is_stale(pipeline.db, settings.search) is False
+
+        categories = pipeline.db.list_taxonomy_categories()
+        topics = pipeline.db.list_taxonomy_topics()
+        assert len(categories) == 2
+        assert len(topics) == 2
+        assert sorted(row["document_count"] for row in topics) == [3, 3]
+
+        drone_taxonomy = pipeline.db.taxonomy_for_document(processed["drone-a.txt"])
+        tourism_taxonomy = pipeline.db.taxonomy_for_document(processed["tourism-a.txt"])
+        assert len(drone_taxonomy["topics"]) == 1
+        assert len(tourism_taxonomy["topics"]) == 1
+        assert (
+            drone_taxonomy["topics"][0]["topic_key"]
+            != tourism_taxonomy["topics"][0]["topic_key"]
+        )
+    finally:
+        pipeline.close()
+
+
+def test_taxonomy_becomes_stale_when_corpus_changes(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import build_adaptive_taxonomy, taxonomy_is_stale
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.taxonomy["min_documents"] = 2
+    settings.taxonomy["min_topic_documents"] = 2
+    settings.taxonomy["label_with_ollama"] = False
+
+    pipeline = LocalPipeline(settings)
+    try:
+        for index in range(2):
+            path = settings.input_dir / f"base-{index}.txt"
+            path.write_text(f"FPV drone corpus document {index}", encoding="utf-8")
+            result = pipeline.process_file(path)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            vector = _normalize_vector([1.0, 0.0])
+            pipeline.db.save_embeddings(
+                [(chunk["id"], settings.search["model"], 2, _vector_to_blob(vector))]
+            )
+
+        build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+        assert taxonomy_is_stale(pipeline.db, settings.search) is False
+
+        path = settings.input_dir / "new.txt"
+        path.write_text("Tourism curriculum and accreditation", encoding="utf-8")
+        result = pipeline.process_file(path)
+        chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+        vector = _normalize_vector([0.0, 1.0])
+        pipeline.db.save_embeddings(
+            [(chunk["id"], settings.search["model"], 2, _vector_to_blob(vector))]
+        )
+
+        assert taxonomy_is_stale(pipeline.db, settings.search) is True
+    finally:
+        pipeline.close()
+
+
+def test_maintenance_auto_rebuilds_stale_taxonomy_without_reprocessing(tmp_path: Path, monkeypatch):
+    import osint_local.actions as actions
+    from osint_local.search import _normalize_vector, _vector_to_blob
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.background["auto_index"] = False
+    settings.translation["passive_enabled"] = False
+    settings.taxonomy["min_documents"] = 2
+    settings.taxonomy["auto_rebuild"] = True
+
+    pipeline = LocalPipeline(settings)
+    calls = []
+    try:
+        for index in range(2):
+            path = settings.input_dir / f"doc-{index}.txt"
+            path.write_text(f"fpv drone report {index}", encoding="utf-8")
+            result = pipeline.process_file(path)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            vector = _normalize_vector([1.0, 0.0])
+            pipeline.db.save_embeddings(
+                [(chunk["id"], settings.search["model"], 2, _vector_to_blob(vector))]
+            )
+
+        def fake_build(db, search_config, taxonomy_config, qa_config, progress=None):
+            calls.append(True)
+            if progress:
+                progress(6, 6, "Adaptive taxonomy ready")
+            return {"categories": 1, "topics": 1, "assigned_documents": 2}
+
+        monkeypatch.setattr(actions, "build_adaptive_taxonomy", fake_build)
+        manager = actions.ActionManager(pipeline)
+        result = manager._run_maintenance()
+
+        assert calls == [True]
+        assert result["taxonomy"]["topics"] == 1
+        assert result["embedded_chunks"] == 0
+        assert result["translated"] == []
+    finally:
         pipeline.close()
