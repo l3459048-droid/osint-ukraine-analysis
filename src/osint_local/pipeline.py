@@ -65,7 +65,15 @@ class LocalPipeline:
 
         stat = path.stat()
         source_path = str(path.relative_to(self.settings.input_dir))
-        if not force and self.db.find_current_source(source_path, stat.st_size, stat.st_mtime_ns):
+        required_pipeline_version = (
+            PIPELINE_VERSION if path.suffix.lower() == ".pdf" else 2
+        )
+        if not force and self.db.find_current_source(
+            source_path,
+            stat.st_size,
+            stat.st_mtime_ns,
+            min_pipeline_version=required_pipeline_version,
+        ):
             return ProcessResult(path, "skipped", message="unchanged")
 
         sha256 = sha256_file(path)
@@ -73,7 +81,7 @@ class LocalPipeline:
         if (
             existing
             and existing["status"] == "done"
-            and int(existing["pipeline_version"] or 1) >= PIPELINE_VERSION
+            and int(existing["pipeline_version"] or 1) >= required_pipeline_version
             and not force
         ):
             return ProcessResult(path, "duplicate", sha256, "content already processed")
