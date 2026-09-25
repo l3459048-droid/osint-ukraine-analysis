@@ -1127,6 +1127,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ollama_error = str(exc)
         profile = str(self.settings.performance.get("profile") or "economy")
         profile_info = PERFORMANCE_PROFILES.get(profile, {})
+        latest_taxonomy = self.db.latest_taxonomy_run()
         return {
             **stats,
             "semantic_available": semantic_available,
@@ -1150,6 +1151,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "quality_setup": self.server.quality_setup.snapshot(),
             "quality_model_ready": quality_model_ready(self.settings),
             "quality_translation_available": quality_translation_available(),
+            "taxonomy_stale": taxonomy_is_stale(self.db, self.settings.search),
+            "taxonomy_last_rebuild": (
+                latest_taxonomy["finished_at"] if latest_taxonomy else None
+            ),
         }
 
     def _activity_payload(self) -> dict:
