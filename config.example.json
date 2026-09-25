@@ -164,6 +164,8 @@
     "label_batch_size": 8,
     "max_llm_labels": 60,
     "topic_label_reuse_similarity": 0.88,
-    "category_label_reuse_similarity": 0.82
+    "category_label_reuse_similarity": 0.82,
+    "topic_assignment_similarity": 0.68,
+    "max_topics_per_document": 4
   }
 }
