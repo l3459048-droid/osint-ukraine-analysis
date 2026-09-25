@@ -635,7 +635,9 @@ class FastTranslator:
                     source,
                     lambda value: self._translate_raw_text(value),
                 )
-                self.literal_segment_fallbacks += 1
+                self.literal_segment_fallbacks = (
+                    getattr(self, "literal_segment_fallbacks", 0) + 1
+                )
             translated.append(_restore_source_urls(source, restored))
 
         for index, (source_value, output) in enumerate(zip(texts, translated)):
