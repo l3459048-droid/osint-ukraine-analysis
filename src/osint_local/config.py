@@ -145,6 +145,7 @@ DEFAULT_CONFIG = {
         "full_rebuild_growth_ratio": 0.10,
         "discovery_min_unassigned": 8,
         "discovery_unassigned_ratio": 0.03,
+        "full_rebuild_after_incremental_refreshes": 20,
         "category_similarity": 0.48,
         "category_merge_similarity": 0.70,
         "topic_label_reuse_similarity": 0.88,
