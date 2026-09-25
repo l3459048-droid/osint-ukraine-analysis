@@ -16,6 +16,13 @@ from .fast_translation import (
     load_fast_benchmark,
     prepare_fast_model,
     translate_sections_fast,
+    _translation_quality_score,
+)
+from .quality_translation import (
+    QUALITY_MODEL_ID,
+    QualityTranslator,
+    quality_model_ready,
+    quality_translation_available,
 )
 
 PAGE_RE = re.compile(r"(?:^|\n)\s*--- PAGE (\d+) ---\s*\n", re.MULTILINE)
@@ -55,6 +62,146 @@ def detect_language(text: str) -> str:
     return "ru" if cyrillic > latin else "en"
 
 
+class _QualityFallbackRouter:
+    """Lazily compare prepared local Quality and Argos candidates."""
+
+    def __init__(
+        self,
+        settings,
+        source_lang: str,
+        target_lang: str,
+        *,
+        progress: Callable[[int, int, str], None] | None = None,
+        allow_model_install: bool = False,
+    ) -> None:
+        self.settings = settings
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        self.progress = progress
+        self.allow_model_install = allow_model_install
+        self._quality = None
+        self._argos = None
+        self._argos_failed = False
+        self.last_engine = ""
+        self.quality_candidate_calls = 0
+        self.argos_candidate_calls = 0
+        self.quality_selected = 0
+        self.argos_selected = 0
+
+        self.quality_ready = (
+            bool(settings.translation.get("quality_engine_enabled", True))
+            and quality_translation_available()
+            and quality_model_ready(settings)
+        )
+        self.argos_ready = False
+        if (
+            bool(settings.translation.get("quality_fallback_enabled", True))
+            and argos_available()
+        ):
+            pair_ready = (source_lang, target_lang) in installed_pairs()
+            auto_install = bool(
+                settings.translation.get("quality_fallback_auto_install", False)
+            )
+            self.argos_ready = pair_ready or (auto_install and allow_model_install)
+
+    @property
+    def available(self) -> bool:
+        return self.quality_ready or self.argos_ready
+
+    def __call__(self, value: str) -> str:
+        candidates: list[tuple[int, str, str]] = []
+
+        if self.quality_ready:
+            try:
+                if self._quality is None:
+                    if self.progress:
+                        self.progress(0, 0, "Loading Quality Translation · M2M100 418M…")
+                    self._quality = QualityTranslator(
+                        self.settings,
+                        self.source_lang,
+                        self.target_lang,
+                    )
+                output = self._quality.translate_text(value)
+                self.quality_candidate_calls += 1
+                if output:
+                    candidates.append(
+                        (
+                            _translation_quality_score(
+                                value,
+                                output,
+                                target_lang=self.target_lang,
+                            ),
+                            "m2m100-418m-int8",
+                            output,
+                        )
+                    )
+            except Exception:
+                self.quality_ready = False
+
+        if self.argos_ready and not self._argos_failed:
+            try:
+                if self._argos is None:
+                    self._argos = _get_argos_translator(
+                        self.source_lang,
+                        self.target_lang,
+                        self.settings,
+                        allow_model_install=(
+                            bool(
+                                self.settings.translation.get(
+                                    "quality_fallback_auto_install",
+                                    False,
+                                )
+                            )
+                            and self.allow_model_install
+                        ),
+                        progress=self.progress,
+                    )
+                output = self._argos(value, self.source_lang, self.target_lang)
+                self.argos_candidate_calls += 1
+                if output:
+                    candidates.append(
+                        (
+                            _translation_quality_score(
+                                value,
+                                output,
+                                target_lang=self.target_lang,
+                            ),
+                            "argos-translate",
+                            output,
+                        )
+                    )
+            except Exception:
+                self._argos_failed = True
+
+        if not candidates:
+            self.last_engine = ""
+            return ""
+
+        candidates.sort(key=lambda item: (item[0], 0 if item[1].startswith("m2m100") else 1))
+        _score, self.last_engine, output = candidates[0]
+        return output
+
+    def record_selected(self) -> None:
+        if self.last_engine.startswith("m2m100"):
+            self.quality_selected += 1
+        elif self.last_engine == "argos-translate":
+            self.argos_selected += 1
+
+    def metadata(self) -> dict:
+        return {
+            "quality_model": QUALITY_MODEL_ID if self.quality_ready or self.quality_candidate_calls else "",
+            "quality_candidate_calls": self.quality_candidate_calls,
+            "quality_selected": self.quality_selected,
+            "argos_candidate_calls": self.argos_candidate_calls,
+            "argos_selected": self.argos_selected,
+            "quality_literal_segment_fallbacks": (
+                int(getattr(self._quality, "literal_segment_fallbacks", 0))
+                if self._quality is not None
+                else 0
+            ),
+        }
+
+
 def translate_document(
     settings,
     db,
@@ -90,7 +237,7 @@ def translate_document(
         sections = [(None, text)]
 
     selected_engine = str(engine or settings.translation.get("engine") or "auto").strip().casefold()
-    if selected_engine not in {"auto", "fast", "argos"}:
+    if selected_engine not in {"auto", "fast", "quality", "argos"}:
         selected_engine = "auto"
 
     custom_translator = translator is not None
@@ -124,38 +271,18 @@ def translate_document(
                 if progress:
                     progress(0, len(sections), f"Using Fast Translation · CTranslate2 INT8 · {src}→{dst}")
 
+                fallback_router = None
                 quality_fallback = None
-                fallback_enabled = (
-                    selected_engine == "auto"
-                    and bool(settings.translation.get("quality_fallback_enabled", True))
-                    and argos_available()
-                )
-                if fallback_enabled:
-                    allow_quality_install = bool(
-                        settings.translation.get("quality_fallback_auto_install", False)
+                if selected_engine == "auto":
+                    fallback_router = _QualityFallbackRouter(
+                        settings,
+                        src,
+                        dst,
+                        progress=progress,
+                        allow_model_install=allow_model_install,
                     )
-                    pair_ready = (src, dst) in installed_pairs()
-                    fallback_state = {"translator": None, "failed": False}
-
-                    if pair_ready or (allow_quality_install and allow_model_install):
-                        def quality_fallback(value: str) -> str:
-                            if fallback_state["failed"]:
-                                return ""
-                            if fallback_state["translator"] is None:
-                                try:
-                                    fallback_state["translator"] = _get_argos_translator(
-                                        src,
-                                        dst,
-                                        settings,
-                                        allow_model_install=(
-                                            allow_quality_install and allow_model_install
-                                        ),
-                                        progress=progress,
-                                    )
-                                except Exception:
-                                    fallback_state["failed"] = True
-                                    return ""
-                            return fallback_state["translator"](value, src, dst)
+                    if fallback_router.available:
+                        quality_fallback = fallback_router
 
                 translated, fast_stats = translate_sections_fast(
                     settings,
@@ -181,7 +308,10 @@ def translate_document(
                     "quality_retries": fast_stats.quality_retries,
                     "quality_fallbacks": fast_stats.quality_fallbacks,
                     "quality_warnings": fast_stats.quality_warnings,
+                    "literal_segment_fallbacks": fast_stats.literal_segment_fallbacks,
                 }
+                if fallback_router is not None:
+                    engine_meta.update(fallback_router.metadata())
             elif selected_engine == "fast":
                 raise RuntimeError(
                     f"Fast model {src}→{dst} is not prepared. Prepare it in System first."
@@ -191,6 +321,30 @@ def translate_document(
                 "Fast Translation dependencies are missing. Run the updater or install: "
                 "pip install -e '.[fasttranslate]'"
             )
+
+        if translated is None and selected_engine == "quality":
+            if not quality_translation_available() or not quality_model_ready(settings):
+                raise RuntimeError(
+                    "Quality Translation model is not prepared. Prepare M2M100 in System first."
+                )
+            if progress:
+                progress(0, len(sections), f"Using Quality Translation · M2M100 418M INT8 · {src}→{dst}")
+            quality_engine = QualityTranslator(settings, src, dst)
+            translated = _translate_sections_legacy(
+                sections,
+                src,
+                dst,
+                lambda value, _a, _b: quality_engine.translate_text(value),
+                int(settings.translation.get("quality_max_chars_per_request", 2400)),
+                progress=progress,
+                should_pause=should_pause,
+            )
+            engine_name = "m2m100-418m-int8"
+            engine_meta = {
+                "model": QUALITY_MODEL_ID,
+                "compute_type": quality_engine.compute_type,
+                "literal_segment_fallbacks": quality_engine.literal_segment_fallbacks,
+            }
 
         if translated is None:
             if progress:
