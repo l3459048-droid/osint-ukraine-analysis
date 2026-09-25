@@ -1329,6 +1329,7 @@ def test_fast_translation_resumes_from_saved_section_checkpoint(tmp_path: Path, 
     import osint_local.fast_translation as fast
 
     settings = load_settings(make_config(tmp_path))
+    settings.translation["fast_page_batch"] = 1
     calls = []
     fail_once = {"value": True}
 
@@ -1694,3 +1695,75 @@ def test_sentencepiece_loader_uses_bytes_for_unicode_windows_paths(tmp_path: Pat
 
     assert isinstance(processor, FakeProcessor)
     assert seen["payload"] == b"serialized-sentencepiece-model"
+
+
+def test_fast_translation_batches_paragraphs_across_multiple_pages(tmp_path: Path, monkeypatch):
+    import osint_local.fast_translation as fast
+
+    settings = load_settings(make_config(tmp_path))
+    settings.translation["fast_page_batch"] = 3
+    settings.translation["fast_text_batch"] = 16
+
+    calls = []
+    checkpoints = []
+
+    class FakeFastTranslator:
+        model_id = "fake/opus"
+        compute_type = "int8"
+        inter_threads = 1
+        intra_threads = 2
+
+        def __init__(self, settings, source_lang, target_lang="ru"):
+            self.model_id = "fake/opus"
+            self.compute_type = "int8"
+            self.inter_threads = 1
+            self.intra_threads = 2
+
+        def translate_texts(self, texts):
+            calls.append(list(texts))
+            return ["RU " + value for value in texts]
+
+    real_save = fast._save_checkpoint
+
+    def capture_checkpoint(settings, sha256, source_lang, target_lang, model_id, translated_by_index):
+        checkpoints.append(sorted(translated_by_index))
+        real_save(
+            settings,
+            sha256,
+            source_lang,
+            target_lang,
+            model_id,
+            translated_by_index,
+        )
+
+    monkeypatch.setattr(fast, "FastTranslator", FakeFastTranslator)
+    monkeypatch.setattr(fast, "_save_checkpoint", capture_checkpoint)
+
+    sections = [
+        (1, "page one"),
+        (2, "page two"),
+        (3, "page three"),
+        (4, "page four"),
+    ]
+    translated, stats = fast.translate_sections_fast(
+        settings,
+        "b" * 64,
+        sections,
+        "en",
+        "ru",
+    )
+
+    assert calls == [
+        ["page one", "page two", "page three"],
+        ["page four"],
+    ]
+    assert checkpoints == [[0, 1, 2], [0, 1, 2, 3]]
+    assert translated == [
+        (1, "RU page one"),
+        (2, "RU page two"),
+        (3, "RU page three"),
+        (4, "RU page four"),
+    ]
+    assert stats.pages_translated == 4
+    assert stats.page_batch == 3
+    assert stats.chars_per_second > 0
