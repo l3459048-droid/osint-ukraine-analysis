@@ -13,6 +13,7 @@ from .pipeline import LocalPipeline
 from .qa import ask_documents, ollama_models
 from .search import build_embeddings, search_chunks
 from .translation import argos_available, installed_pairs, translate_document
+from .taxonomy import build_adaptive_taxonomy
 
 
 def configure_logging(log_dir: Path | None = None, verbose: bool = False) -> None:
@@ -42,6 +43,7 @@ def main() -> int:
 
     index = sub.add_parser("index", help="Build local semantic embeddings for indexed chunks")
     index.add_argument("--force", action="store_true", help="Rebuild embeddings even if they exist")
+    sub.add_parser("taxonomy", help="Rebuild adaptive corpus categories and topics from semantic embeddings")
 
     search = sub.add_parser("search", help="Search indexed document chunks")
     search.add_argument("query")
@@ -111,7 +113,20 @@ def main() -> int:
             return 0
 
         if args.command == "status":
-            print(json.dumps(pipeline.db.stats(), ensure_ascii=False, indent=2))
+            payload = pipeline.db.stats()
+            payload["taxonomy"] = pipeline.db.taxonomy_counts()
+            latest = pipeline.db.latest_taxonomy_run()
+            payload["taxonomy_latest"] = (
+                {
+                    "id": int(latest["id"]),
+                    "finished_at": latest["finished_at"],
+                    "model": latest["model"],
+                    "topics": int(latest["topic_count"]),
+                    "categories": int(latest["category_count"]),
+                }
+                if latest else None
+            )
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
 
         if args.command == "index":
@@ -121,6 +136,20 @@ def main() -> int:
                 print(str(exc))
                 return 2
             print(json.dumps({"embedded_chunks": count, "model": settings.search.get("model")}, indent=2))
+            return 0
+
+        if args.command == "taxonomy":
+            try:
+                result = build_adaptive_taxonomy(
+                    pipeline.db,
+                    settings.search,
+                    settings.taxonomy,
+                    settings.qa,
+                )
+            except RuntimeError as exc:
+                print(str(exc))
+                return 2
+            print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
 
         if args.command == "search":
