@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.16
+# OSINT Ukraine Analysis — local-first v0.9.17
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.16
+## Что делает v0.9.17
 
 ```text
 папка документов
@@ -98,6 +98,32 @@ osint-local translate <SHA256> --from auto
 ```
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
+
+## Quality Translation + protected facts + persistent PDF layout v0.9.17
+
+В дополнение к Fast OPUS появился локальный **Quality Translation** engine на базе `facebook/m2m100_418M`, конвертируемый в CTranslate2 INT8. В System есть отдельная подготовка модели. В режиме Auto OPUS остаётся быстрым основным путём; M2M100 загружается лениво только для фрагментов, которые не прошли quality gate. Если Fast Translation вообще недоступен, уже подготовленный Quality engine может использоваться как основной локальный переводчик.
+
+Для M2M100 используется его нативный multilingual contract: source language prefix (`__uk__` / `__en__`) во входе и target prefix `__ru__` при decoding, beam size 5. После подготовки выполняется небольшой benchmark на реальных UK→RU фрагментах проблемного образовательного PDF и сохраняется сравнение OPUS vs M2M100 по скорости, quality heuristics и reference similarity.
+
+### Protected literals
+
+Критические факты теперь защищаются до передачи модели. В protected set входят даты, числа, URL, длинные SHA-like идентификаторы и коды вроде `J3`, `FQ`, `EHEA`, `QF-LLL`, `ECTS/ЄКТС`. Сначала они заменяются collision-resistant placeholders и после перевода восстанавливаются точно. Если модель повредила placeholder, pipeline автоматически переключается на segment-around-literals fallback: переводятся только текстовые промежутки, а исходные literals вставляются обратно без изменений.
+
+Quality gate рассматривает потерю protected literal как hard failure, а не как небольшой soft penalty. Это закрывает класс ошибок, где `01.09.2026` исчезала из перевода.
+
+### Hybrid engine provenance
+
+Для подозрительного сегмента Auto может сравнить Fast retry, M2M100 и уже установленный Argos. Сохраняются счётчики candidate/selected для Quality и Argos, protected-literal fallbacks и тип hybrid engine. Если M2M100 реально заменил часть OPUS-результата, translation record больше не выглядит как чистый `ctranslate2-int8`.
+
+### Persistent PDF layout artifact
+
+PDF extraction теперь сохраняет отдельный geometry artifact:
+
+`workspace/layout/<sha256>.json`
+
+Для каждой страницы сохраняются width/height/rotation, стабильные block/line/span IDs, bbox, text, font, size, flags, color, origin и line direction. Этот artifact не заменяет semantic extracted text — он является отдельным слоем для следующего layout-preserving PDF renderer. Pipeline version повышена до 5, поэтому старые PDF один раз переизвлекаются и получают layout artifact; TXT/DOCX из-за этого не переобрабатываются.
+
+Fast Translation checkpoint pipeline повышен до version 6, чтобы старые незавершённые результаты не смешивались с protected-literal логикой.
 
 ## Layout-aware PDF + Translation Quality Gate v0.9.16
 
