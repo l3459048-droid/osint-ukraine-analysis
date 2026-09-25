@@ -3095,3 +3095,54 @@ def test_layout_pdf_export_preserves_geometry_and_vector_lines(tmp_path: Path):
         assert export_meta["overflow_blocks"] == 0
     finally:
         pipeline.close()
+
+
+
+def test_web_layout_pdf_export_route_returns_pdf(tmp_path: Path, monkeypatch):
+    import fitz
+    import threading
+    import urllib.request
+
+    import osint_local.web as web
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+
+    dummy_pdf = tmp_path / "translated-layout.pdf"
+    doc = fitz.open()
+    doc.new_page(width=300, height=400)
+    doc.save(dummy_pdf)
+    doc.close()
+
+    monkeypatch.setattr(
+        web,
+        "export_translation_layout_pdf",
+        lambda settings, db, sha256, source_lang, target_lang="ru": dummy_pdf,
+    )
+
+    try:
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        sha256 = "a" * 64
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/translation-export/{sha256}/uk/ru/pdf-layout",
+            timeout=5,
+        ) as response:
+            payload = response.read()
+            assert response.status == 200
+            assert response.headers.get_content_type() == "application/pdf"
+            assert response.headers.get("Content-Disposition", "").startswith("attachment;")
+            assert payload.startswith(b"%PDF")
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
