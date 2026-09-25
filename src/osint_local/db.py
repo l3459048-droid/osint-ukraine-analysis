@@ -823,6 +823,52 @@ class Database:
                 (max(1, min(5000, int(limit))),),
             ).fetchall()
 
+    def get_taxonomy_category(self, category_key: str):
+        with self._lock:
+            return self.conn.execute(
+                """SELECT * FROM taxonomy_categories
+                   WHERE category_key=?""",
+                (category_key,),
+            ).fetchone()
+
+    def get_taxonomy_topic(self, topic_key: str):
+        with self._lock:
+            return self.conn.execute(
+                """SELECT t.*, c.name AS category_name
+                   FROM taxonomy_topics t
+                   LEFT JOIN taxonomy_categories c
+                     ON c.category_key=t.category_key
+                   WHERE t.topic_key=?""",
+                (topic_key,),
+            ).fetchone()
+
+    def taxonomy_unassigned_documents(
+        self,
+        *,
+        limit: int = 300,
+    ) -> list[sqlite3.Row]:
+        limit = max(1, min(5000, int(limit)))
+        with self._lock:
+            return self.conn.execute(
+                """SELECT d.*, 0.0 AS taxonomy_score
+                   FROM documents d
+                   WHERE d.status='done'
+                     AND EXISTS (
+                         SELECT 1
+                         FROM chunks c
+                         JOIN embeddings e ON e.chunk_id=c.id
+                         WHERE c.document_sha256=d.sha256
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM document_taxonomy_topics dtt
+                         WHERE dtt.document_sha256=d.sha256
+                     )
+                   ORDER BY d.processed_at DESC, d.source_path
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+
     def taxonomy_for_document(self, sha256: str) -> dict[str, list[sqlite3.Row]]:
         with self._lock:
             categories = self.conn.execute(
