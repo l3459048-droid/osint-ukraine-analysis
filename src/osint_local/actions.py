@@ -170,6 +170,7 @@ class ActionManager:
             self.pipeline.settings.taxonomy,
             self.pipeline.settings.qa,
             progress=progress,
+            should_pause=self.interactive_busy,
         )
 
     def _run_translate(self, sha256: str, source_lang: str, target_lang: str) -> dict[str, Any]:
@@ -256,6 +257,7 @@ class ActionManager:
                         progress=lambda current, total, message: self._progress(
                             current, total, message
                         ),
+                        should_pause=self.interactive_busy,
                     )
                 else:
                     self._progress(0, 0, "Refreshing adaptive taxonomy…")
@@ -266,6 +268,7 @@ class ActionManager:
                         progress=lambda current, total, message: self._progress(
                             current, total, message
                         ),
+                        should_pause=self.interactive_busy,
                     )
                     if refresh_result.get("needs_rebuild"):
                         self._progress(
@@ -281,6 +284,7 @@ class ActionManager:
                             progress=lambda current, total, message: self._progress(
                                 current, total, message
                             ),
+                            should_pause=self.interactive_busy,
                         )
                         taxonomy_result["trigger"] = refresh_result.get("reason") or ""
                     else:
