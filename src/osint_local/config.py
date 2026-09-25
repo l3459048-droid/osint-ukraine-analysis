@@ -141,6 +141,8 @@ DEFAULT_CONFIG = {
         "topic_merge_similarity": 0.82,
         "category_similarity": 0.48,
         "category_merge_similarity": 0.70,
+        "topic_label_reuse_similarity": 0.88,
+        "category_label_reuse_similarity": 0.82,
         "max_topics": 80,
         "max_categories": 24,
         "label_with_ollama": True,
