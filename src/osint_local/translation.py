@@ -580,7 +580,12 @@ def translation_queue_status(settings, db, *, available_pairs=None, limit: int =
         installed_pairs() if argos_available() else set()
     )
     fast_pairs = fast_ready_pairs(settings) if fast_translation_available() else set()
-    ready_pairs = argos_pairs | fast_pairs
+    quality_pairs = (
+        {("en", "ru"), ("uk", "ru")}
+        if quality_translation_available() and quality_model_ready(settings)
+        else set()
+    )
+    ready_pairs = argos_pairs | fast_pairs | quality_pairs
 
     eligible = 0
     translated = 0
@@ -655,6 +660,11 @@ def next_passive_translation(
         installed_pairs() if argos_available() else set()
     )
     fast_pairs = fast_ready_pairs(settings) if fast_translation_available() else set()
+    quality_pairs = (
+        {("en", "ru"), ("uk", "ru")}
+        if quality_translation_available() and quality_model_ready(settings)
+        else set()
+    )
     selected_engine = str(settings.translation.get("engine") or "auto").strip().casefold()
 
     for doc in db.list_documents(limit=5000):
@@ -674,9 +684,16 @@ def next_passive_translation(
         if translator is None:
             if selected_engine == "fast" and pair not in fast_pairs:
                 continue
+            if selected_engine == "quality" and pair not in quality_pairs:
+                continue
             if selected_engine == "argos" and pair not in argos_pairs:
                 continue
-            if selected_engine == "auto" and pair not in fast_pairs and pair not in argos_pairs:
+            if (
+                selected_engine == "auto"
+                and pair not in fast_pairs
+                and pair not in quality_pairs
+                and pair not in argos_pairs
+            ):
                 continue
 
         return translate_document(
