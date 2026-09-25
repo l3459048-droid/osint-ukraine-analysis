@@ -2099,3 +2099,58 @@ def test_fast_translation_restores_exact_source_urls():
     restored = fast._restore_source_urls(source, translated)
     assert "http://idgu.edu.ua/ects" in restored
     assert "idgu.eua" not in restored
+
+
+
+def test_pdf_text_quality_distinguishes_clean_text_from_corruption():
+    from osint_local.extractors import _pdf_text_quality
+
+    clean = (
+        "МІНІСТЕРСТВО ОСВІТИ І НАУКИ УКРАЇНИ\n"
+        "Освітня програма Туризм та рекреація. "
+        "Ректор __________________ Ярослав КІЧУК."
+    )
+    corrupt = "\ufffd\ufffd\ufffd \x00 ÃÃÃ AAAAAAAA !!!!!"
+
+    clean_metrics = _pdf_text_quality(clean, min_chars=40)
+    corrupt_metrics = _pdf_text_quality(corrupt, min_chars=40)
+
+    assert clean_metrics["score"] >= 0.7
+    assert corrupt_metrics["score"] < clean_metrics["score"]
+    assert corrupt_metrics["replacement_chars"] == 3
+
+
+def test_pdf_ocr_selection_requires_real_quality_improvement():
+    from osint_local.extractors import _pdf_text_quality, _prefer_ocr
+
+    native = _pdf_text_quality(
+        "ЛИСТ ПОГОДЖЕННЯ. Рада з якості вищої освіти ІДГУ. " * 4,
+        min_chars=40,
+    )
+    weak_ocr = _pdf_text_quality("ЛИСТ ПОГОДЖЕННЯ Рада якост освт", min_chars=40)
+    strong_ocr = _pdf_text_quality(
+        "ЛИСТ ПОГОДЖЕННЯ. Рада з якості вищої освіти ІДГУ. " * 4,
+        min_chars=40,
+    )
+    damaged_native = dict(native)
+    damaged_native["score"] = 0.45
+
+    assert not _prefer_ocr(
+        native,
+        weak_ocr,
+        min_chars=40,
+        improvement_margin=0.08,
+    )
+    assert _prefer_ocr(
+        damaged_native,
+        strong_ocr,
+        min_chars=40,
+        improvement_margin=0.08,
+    )
+
+
+def test_pdf_text_normalization_removes_hidden_unicode_only():
+    from osint_local.extractors import _normalize_pdf_text
+
+    value = "Ізмаїл\u00a0–\u200b 2026\u00ad р. № 1"
+    assert _normalize_pdf_text(value) == "Ізмаїл – 2026 р. № 1"
