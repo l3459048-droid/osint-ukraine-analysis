@@ -932,6 +932,65 @@ class Database:
                 )
             self.conn.commit()
 
+    def rekey_taxonomy_label_override(
+        self,
+        *,
+        kind: str,
+        old_key: str,
+        new_key: str,
+        centroid: bytes | None,
+        dimension: int,
+        updated_at: str,
+    ) -> None:
+        kind = str(kind or "").strip().casefold()
+        old_key = str(old_key or "").strip()
+        new_key = str(new_key or "").strip()
+        if kind not in {"category", "topic"} or not old_key or not new_key:
+            return
+        with self._lock:
+            if old_key == new_key:
+                self.conn.execute(
+                    """UPDATE taxonomy_label_overrides
+                       SET centroid=?, dimension=?, updated_at=?
+                       WHERE kind=? AND source_key=?""",
+                    (
+                        centroid,
+                        int(dimension or 0),
+                        updated_at,
+                        kind,
+                        old_key,
+                    ),
+                )
+                self.conn.commit()
+                return
+
+            existing = self.conn.execute(
+                """SELECT id FROM taxonomy_label_overrides
+                   WHERE kind=? AND source_key=?""",
+                (kind, new_key),
+            ).fetchone()
+            if existing:
+                self.conn.execute(
+                    """DELETE FROM taxonomy_label_overrides
+                       WHERE kind=? AND source_key=?""",
+                    (kind, old_key),
+                )
+            else:
+                self.conn.execute(
+                    """UPDATE taxonomy_label_overrides
+                       SET source_key=?, centroid=?, dimension=?, updated_at=?
+                       WHERE kind=? AND source_key=?""",
+                    (
+                        new_key,
+                        centroid,
+                        int(dimension or 0),
+                        updated_at,
+                        kind,
+                        old_key,
+                    ),
+                )
+            self.conn.commit()
+
     def list_taxonomy_label_overrides(
         self,
         *,
