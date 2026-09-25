@@ -20,6 +20,7 @@ FAST_TOKENIZER_FILES = ("source.spm", "target.spm")
 FAST_BEAM_SIZE = 2
 FAST_REPETITION_PENALTY = 1.1
 FAST_NO_REPEAT_NGRAM_SIZE = 3
+FAST_SOURCE_EOS_TOKEN = "</s>"
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,17 @@ def _load_sentencepiece_processor(spm_module, path: Path):
     return processor
 
 
+def _source_token_windows(tokens: Sequence[str], max_input_tokens: int) -> list[list[str]]:
+    # Models converted with TransformersConverter expect the same special tokens
+    # returned by the Hugging Face tokenizer. MarianTokenizer appends </s> to
+    # every source sequence; raw SentencePiece does not, so we add it here.
+    content_limit = max(1, int(max_input_tokens) - 1)
+    return [
+        list(tokens[start:start + content_limit]) + [FAST_SOURCE_EOS_TOKEN]
+        for start in range(0, len(tokens), content_limit)
+    ]
+
+
 def _decode_options(tokenized: Sequence[Sequence[str]]) -> dict:
     longest_source = max((len(tokens) for tokens in tokenized), default=0)
     max_decoding_length = max(48, min(384, int(longest_source * 1.8) + 24))
@@ -320,8 +332,8 @@ class FastTranslator:
                 tokenized.append([])
                 ownership.append(text_index)
                 continue
-            for start in range(0, len(tokens), self.max_input_tokens):
-                tokenized.append(tokens[start:start + self.max_input_tokens])
+            for window in _source_token_windows(tokens, self.max_input_tokens):
+                tokenized.append(window)
                 ownership.append(text_index)
 
         if not tokenized:

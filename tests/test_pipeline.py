@@ -2010,3 +2010,14 @@ def test_fast_translation_quality_guards_scale_decoding_to_real_input():
     assert long["max_decoding_length"] < 440
     assert long["max_decoding_length"] <= 384
     assert long["max_decoding_length"] > short["max_decoding_length"]
+
+
+
+def test_fast_translation_source_windows_append_marian_eos():
+    import osint_local.fast_translation as fast
+
+    windows = fast._source_token_windows(["a", "b", "c", "d", "e"], 4)
+
+    assert windows == [["a", "b", "c", "</s>"], ["d", "e", "</s>"]]
+    assert all(window[-1] == "</s>" for window in windows)
+    assert all(len(window) <= 4 for window in windows)
