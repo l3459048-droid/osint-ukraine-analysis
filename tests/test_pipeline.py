@@ -2628,3 +2628,93 @@ def test_protected_literals_preserve_multiplicity_but_not_translatable_yekts():
     assert "240" in literals
     assert "ЄКТС" not in literals
     assert missing_protected_literals(source, "В 2026 году программа J3 имеет 240 кредитов ЕКТС.") == ("2026",)
+
+
+
+def test_manual_translation_ui_defaults_to_prepared_quality_engine(tmp_path: Path, monkeypatch):
+    import re
+    import time
+    import urllib.parse
+    import urllib.request
+
+    import osint_local.web as web
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "important-uk.txt"
+    source.write_text(
+        "Освітня програма вводиться в дію з 01.09.2026 р.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    captured = {}
+
+    def fake_translate_document(settings, db, sha256, **kwargs):
+        captured.update(kwargs)
+        if kwargs.get("progress"):
+            kwargs["progress"](1, 1, "Using Quality Translation · M2M100 418M INT8")
+        return {
+            "document_sha256": sha256,
+            "source_lang": "uk",
+            "target_lang": "ru",
+            "engine": "m2m100-418m-int8",
+        }
+
+    try:
+        processed = pipeline.process_file(source)
+        monkeypatch.setattr(web, "quality_translation_available", lambda: True)
+        monkeypatch.setattr(web, "quality_model_ready", lambda _settings: True)
+        monkeypatch.setattr(web, "translate_document", fake_translate_document)
+
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(
+            f"{base}/documents/{processed.sha256}",
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+
+        assert 'option value="quality" selected' in body
+        csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+        request = urllib.request.Request(
+            base + "/actions/translate",
+            data=urllib.parse.urlencode(
+                {
+                    "csrf": csrf,
+                    "sha256": processed.sha256,
+                    "source_lang": "uk",
+                    "target_lang": "ru",
+                    "engine": "quality",
+                }
+            ).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 202
+        assert payload["translation"]["engine"] == "quality"
+
+        deadline = time.time() + 2
+        state = server.translation.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = server.translation.snapshot()
+
+        assert state["status"] == "succeeded"
+        assert captured["engine"] == "quality"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
