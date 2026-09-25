@@ -141,6 +141,21 @@ CREATE TABLE IF NOT EXISTS document_taxonomy_categories (
 CREATE INDEX IF NOT EXISTS idx_document_taxonomy_categories_category
     ON document_taxonomy_categories(category_key, score DESC);
 
+CREATE TABLE IF NOT EXISTS taxonomy_label_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    centroid BLOB,
+    dimension INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(kind, source_key)
+);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_label_overrides_kind
+    ON taxonomy_label_overrides(kind, updated_at DESC);
+
 """
 
 
@@ -841,6 +856,88 @@ class Database:
                    WHERE t.topic_key=?""",
                 (topic_key,),
             ).fetchone()
+
+    def save_taxonomy_label_override(
+        self,
+        *,
+        kind: str,
+        source_key: str,
+        name: str,
+        description: str,
+        updated_at: str,
+    ) -> None:
+        kind = str(kind or "").strip().casefold()
+        if kind not in {"category", "topic"}:
+            raise ValueError("Invalid taxonomy label kind")
+        source_key = str(source_key or "").strip()
+        if kind == "category":
+            row = self.get_taxonomy_category(source_key)
+            centroid_key = "centroid"
+            dimension_key = "dimension"
+        else:
+            row = self.get_taxonomy_topic(source_key)
+            centroid_key = "centroid"
+            dimension_key = "dimension"
+        if not row:
+            raise ValueError("Taxonomy item not found")
+
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO taxonomy_label_overrides
+                   (kind, source_key, name, description, centroid, dimension,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(kind, source_key) DO UPDATE SET
+                       name=excluded.name,
+                       description=excluded.description,
+                       centroid=excluded.centroid,
+                       dimension=excluded.dimension,
+                       updated_at=excluded.updated_at""",
+                (
+                    kind,
+                    source_key,
+                    str(name or "").strip(),
+                    str(description or "").strip(),
+                    row[centroid_key],
+                    int(row[dimension_key] or 0),
+                    updated_at,
+                    updated_at,
+                ),
+            )
+            self.conn.commit()
+
+    def list_taxonomy_label_overrides(
+        self,
+        *,
+        kind: str,
+        limit: int = 1000,
+    ) -> list[sqlite3.Row]:
+        kind = str(kind or "").strip().casefold()
+        with self._lock:
+            return self.conn.execute(
+                """SELECT * FROM taxonomy_label_overrides
+                   WHERE kind=?
+                   ORDER BY updated_at DESC, id DESC
+                   LIMIT ?""",
+                (kind, max(1, min(5000, int(limit)))),
+            ).fetchall()
+
+    def delete_taxonomy_label_override(
+        self,
+        *,
+        kind: str,
+        source_key: str,
+    ) -> None:
+        with self._lock:
+            self.conn.execute(
+                """DELETE FROM taxonomy_label_overrides
+                   WHERE kind=? AND source_key=?""",
+                (
+                    str(kind or "").strip().casefold(),
+                    str(source_key or "").strip(),
+                ),
+            )
+            self.conn.commit()
 
     def taxonomy_unassigned_documents(
         self,
