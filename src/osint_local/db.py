@@ -5,6 +5,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+PIPELINE_VERSION = 3
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,7 +22,7 @@ CREATE TABLE IF NOT EXISTS documents (
     error TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     language TEXT,
-    pipeline_version INTEGER NOT NULL DEFAULT 2
+    pipeline_version INTEGER NOT NULL DEFAULT 3
 );
 CREATE INDEX IF NOT EXISTS idx_documents_source_path ON documents(source_path);
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
@@ -190,9 +192,9 @@ class Database:
             return self.conn.execute(
                 """SELECT * FROM documents
                    WHERE source_path = ? AND source_size = ? AND source_mtime_ns = ?
-                     AND pipeline_version >= 2 AND status='done'
+                     AND pipeline_version >= ? AND status='done'
                    ORDER BY id DESC LIMIT 1""",
-                (source_path, size, mtime_ns),
+                (source_path, size, mtime_ns, PIPELINE_VERSION),
             ).fetchone()
 
     def upsert_processing(
@@ -225,8 +227,8 @@ class Database:
         with self._lock:
             self.conn.execute(
                 """UPDATE documents SET status='done', extraction_method=?, text_chars=?,
-                   processed_at=?, error=NULL, metadata_json=?, language=?, pipeline_version=2 WHERE sha256=?""",
-                (extraction_method, text_chars, processed_at, metadata_json, language, sha256),
+                   processed_at=?, error=NULL, metadata_json=?, language=?, pipeline_version=? WHERE sha256=?""",
+                (extraction_method, text_chars, processed_at, metadata_json, language, PIPELINE_VERSION, sha256),
             )
             self.conn.execute(
                 "DELETE FROM classifications WHERE document_sha256=?", (sha256,)
