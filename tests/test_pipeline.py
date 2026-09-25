@@ -4420,3 +4420,106 @@ def test_manual_taxonomy_override_has_priority_over_reused_label():
     assert candidate["name"] == "Pinned Human Name"
     assert candidate["description"] == "Pinned description"
     assert candidate["label_source"] == "manual"
+
+
+
+def test_search_filters_by_adaptive_taxonomy_end_to_end(tmp_path: Path):
+    import urllib.parse
+    import urllib.request
+    from array import array
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.search["semantic_enabled"] = False
+    settings.input_dir.mkdir(parents=True)
+
+    drone_path = settings.input_dir / "drone.txt"
+    drone_path.write_text("shared keyword drone operations", encoding="utf-8")
+    tourism_path = settings.input_dir / "tourism.txt"
+    tourism_path.write_text("shared keyword tourism curriculum", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        drone = pipeline.process_file(drone_path)
+        tourism = pipeline.process_file(tourism_path)
+
+        vector = array("f", [1.0, 0.0]).tobytes()
+        now = "2026-09-25T00:00:00+00:00"
+        run_id = pipeline.db.begin_taxonomy_run(
+            started_at=now,
+            model=settings.search["model"],
+            document_count=2,
+            embedding_count=0,
+        )
+        pipeline.db.replace_taxonomy(
+            run_id=run_id,
+            finished_at=now,
+            categories=[
+                {
+                    "key": "category-drone",
+                    "name": "Drones",
+                    "description": "Drone category",
+                    "keywords_json": '["drone"]',
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 1,
+                    "topic_count": 1,
+                    "source": "discovered",
+                }
+            ],
+            topics=[
+                {
+                    "key": "topic-fpv",
+                    "category_key": "category-drone",
+                    "name": "FPV",
+                    "description": "FPV topic",
+                    "keywords_json": '["fpv", "drone"]',
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 1,
+                    "source": "discovered",
+                }
+            ],
+            category_assignments=[
+                (drone.sha256, "category-drone", 0.95),
+            ],
+            topic_assignments=[
+                (drone.sha256, "topic-fpv", 0.95),
+            ],
+            details_json="{}",
+        )
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        query = urllib.parse.urlencode(
+            {
+                "q": "shared keyword",
+                "mode": "lexical",
+                "taxonomy_topic": "topic-fpv",
+            }
+        )
+        with urllib.request.urlopen(base + "/search?" + query, timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "drone.txt" in body
+        assert "tourism.txt" not in body
+        assert 'value="topic-fpv" selected' in body
+
+        with urllib.request.urlopen(base + "/api/search?" + query, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert payload["filters"]["taxonomy_topic"] == "topic-fpv"
+        assert len(payload["results"]) == 1
+        assert payload["results"][0]["document_sha256"] == drone.sha256
+        assert payload["results"][0]["document_sha256"] != tourism.sha256
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
