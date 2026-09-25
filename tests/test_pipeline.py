@@ -1290,6 +1290,8 @@ def test_web_ask_filters_are_passed_to_retrieval(tmp_path: Path, monkeypatch):
             body = response.read().decode("utf-8")
         assert "Last 30 days" in body
         assert "Specific documents" in body
+        assert "Adaptive category" in body
+        assert "Topic" in body
         assert "English" in body
         match = re.search(r'name="csrf" value="([^"]+)"', body)
         assert match
@@ -1300,6 +1302,8 @@ def test_web_ask_filters_are_passed_to_retrieval(tmp_path: Path, monkeypatch):
             "mode": "quick",
             "period": "30",
             "domain": "Drones",
+            "taxonomy_category": "category-demo",
+            "taxonomy_topic": "topic-demo",
             "folder": "reports",
             "language": "en",
             "documents": doc["sha256"],
@@ -1319,6 +1323,8 @@ def test_web_ask_filters_are_passed_to_retrieval(tmp_path: Path, monkeypatch):
 
         filters = captured["filters"]
         assert filters["domain"] == "Drones"
+        assert filters["taxonomy_category"] == "category-demo"
+        assert filters["taxonomy_topic"] == "topic-demo"
         assert filters["source_prefix"] == "reports"
         assert filters["language"] == "en"
         assert filters["document_sha256s"] == [doc["sha256"]]
@@ -3311,4 +3317,157 @@ def test_maintenance_auto_rebuilds_stale_taxonomy_without_reprocessing(tmp_path:
         assert result["embedded_chunks"] == 0
         assert result["translated"] == []
     finally:
+        pipeline.close()
+
+
+
+def test_adaptive_taxonomy_supports_multilabel_topics(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import build_adaptive_taxonomy
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.taxonomy["min_documents"] = 5
+    settings.taxonomy["min_topic_documents"] = 2
+    settings.taxonomy["topic_similarity"] = 0.80
+    settings.taxonomy["topic_merge_similarity"] = 0.95
+    settings.taxonomy["topic_assignment_similarity"] = 0.65
+    settings.taxonomy["max_topics_per_document"] = 3
+    settings.taxonomy["category_similarity"] = 0.80
+    settings.taxonomy["category_merge_similarity"] = 0.95
+    settings.taxonomy["label_with_ollama"] = False
+
+    documents = {
+        "drone-a.txt": ("FPV drone systems.", [1.0, 0.0]),
+        "drone-b.txt": ("UAV drone operations.", [0.98, 0.02]),
+        "tourism-a.txt": ("Tourism curriculum.", [0.0, 1.0]),
+        "tourism-b.txt": ("Tourism accreditation.", [0.02, 0.98]),
+        "mixed.txt": ("Drone training in tourism education.", [0.71, 0.71]),
+    }
+
+    pipeline = LocalPipeline(settings)
+    try:
+        shas = {}
+        for name, (text_value, vector) in documents.items():
+            path = settings.input_dir / name
+            path.write_text(text_value, encoding="utf-8")
+            result = pipeline.process_file(path)
+            shas[name] = result.sha256
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            normalized = _normalize_vector(vector)
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        len(normalized),
+                        _vector_to_blob(normalized),
+                    )
+                ]
+            )
+
+        result = build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+        assert result["topics"] == 2
+
+        mixed = pipeline.db.taxonomy_for_document(shas["mixed.txt"])
+        assert len(mixed["topics"]) == 2
+        assert len({row["topic_key"] for row in mixed["topics"]}) == 2
+    finally:
+        pipeline.close()
+
+
+def test_taxonomy_reuses_stable_labels_for_similar_clusters():
+    import osint_local.taxonomy as taxonomy
+
+    candidates = [
+        {
+            "key": "topic-new",
+            "name": "Fallback",
+            "description": "Fallback description",
+            "vector": [1.0, 0.0],
+            "document_count": 10,
+        }
+    ]
+
+    class Row(dict):
+        __getattr__ = dict.__getitem__
+
+    from array import array
+    previous = [
+        Row(
+            centroid=array("f", [0.99, 0.01]).tobytes(),
+            name="FPV Drones",
+            description="Stable existing label",
+        )
+    ]
+
+    taxonomy._reuse_previous_labels(candidates, previous, threshold=0.88)
+
+    assert candidates[0]["name"] == "FPV Drones"
+    assert candidates[0]["description"] == "Stable existing label"
+    assert candidates[0]["label_locked"] is True
+
+
+def test_web_taxonomy_page_and_rebuild_action(tmp_path: Path):
+    import re
+    import urllib.parse
+    import urllib.request
+
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "taxonomy.txt"
+    source.write_text("FPV drone taxonomy document", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        processed = pipeline.process_file(source)
+        chunk = pipeline.db.chunks_for_document(processed.sha256, limit=1)[0]
+        vector = _normalize_vector([1.0, 0.0])
+        pipeline.db.save_embeddings(
+            [(chunk["id"], settings.search["model"], 2, _vector_to_blob(vector))]
+        )
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        server.actions.start_taxonomy = lambda: {
+            "kind": "taxonomy",
+            "status": "running",
+            "message": "Starting…",
+        }
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/taxonomy", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "Adaptive Corpus Taxonomy" in body
+        assert "Rebuild taxonomy" in body
+        csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+        request = urllib.request.Request(
+            base + "/actions/taxonomy",
+            data=urllib.parse.urlencode({"csrf": csrf}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 202
+        assert payload["action"]["kind"] == "taxonomy"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
         pipeline.close()
