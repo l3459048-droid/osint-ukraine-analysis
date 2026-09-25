@@ -166,6 +166,10 @@
     "topic_label_reuse_similarity": 0.88,
     "category_label_reuse_similarity": 0.82,
     "topic_assignment_similarity": 0.68,
-    "max_topics_per_document": 4
+    "max_topics_per_document": 4,
+    "full_rebuild_min_growth": 30,
+    "full_rebuild_growth_ratio": 0.1,
+    "discovery_min_unassigned": 8,
+    "discovery_unassigned_ratio": 0.03
   }
 }
