@@ -4534,3 +4534,27 @@ def test_search_filters_by_adaptive_taxonomy_end_to_end(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_pinned_taxonomy_name_stays_exact_when_auto_label_collides():
+    import osint_local.taxonomy as taxonomy
+
+    candidates = [
+        {
+            "key": "manual",
+            "name": "Energy",
+            "description": "Pinned",
+            "label_source": "manual",
+        },
+        {
+            "key": "auto",
+            "name": "Energy",
+            "description": "Automatic",
+        },
+    ]
+
+    taxonomy._apply_labels(candidates, {})
+
+    assert candidates[0]["name"] == "Energy"
+    assert candidates[1]["name"] == "Energy 2"
