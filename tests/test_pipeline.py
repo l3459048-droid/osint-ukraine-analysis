@@ -1807,3 +1807,74 @@ def test_manual_translate_action_forces_auto_engine_even_if_config_says_argos(tm
         assert captured["engine"] == "auto"
     finally:
         pipeline.close()
+
+
+def test_manual_translation_can_start_while_maintenance_is_running(tmp_path: Path, monkeypatch):
+    import threading
+    import time
+
+    import osint_local.web as web
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "manual-priority.txt"
+    source.write_text("English source document.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    maintenance_entered = threading.Event()
+    release_maintenance = threading.Event()
+    translate_entered = threading.Event()
+    captured = {}
+
+    def fake_maintenance():
+        maintenance_entered.set()
+        release_maintenance.wait(2)
+        return {
+            "files_seen": 0,
+            "counts": {},
+            "embedded_chunks": 0,
+            "translated": [],
+        }
+
+    def fake_translate_document(settings, db, sha256, **kwargs):
+        captured.update(kwargs)
+        translate_entered.set()
+        if kwargs.get("progress"):
+            kwargs["progress"](1, 1, "Using Fast Translation · CTranslate2 INT8 · en→ru")
+        return {
+            "document_sha256": sha256,
+            "source_lang": "en",
+            "target_lang": "ru",
+            "engine": "ctranslate2-int8",
+        }
+
+    try:
+        processed = pipeline.process_file(source)
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        monkeypatch.setattr(server.actions, "_run_maintenance", fake_maintenance)
+        monkeypatch.setattr(web, "translate_document", fake_translate_document)
+
+        server.actions.start_maintenance()
+        assert maintenance_entered.wait(1)
+        assert server.actions.snapshot()["status"] == "running"
+
+        state = server.translation.start(processed.sha256, "auto", "ru")
+        assert state["status"] == "running"
+        assert translate_entered.wait(1)
+
+        deadline = time.time() + 2
+        state = server.translation.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = server.translation.snapshot()
+
+        assert state["status"] == "succeeded"
+        assert state["result"]["engine"] == "ctranslate2-int8"
+        assert captured["engine"] == "auto"
+        assert server.actions.snapshot()["status"] == "running"
+    finally:
+        release_maintenance.set()
+        if server is not None:
+            server.server_close()
+        pipeline.close()
