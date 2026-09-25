@@ -846,15 +846,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ValueError:
             limit = 10
 
+        taxonomy_category = _first(query, "taxonomy_category").strip()
+        taxonomy_topic = _first(query, "taxonomy_topic").strip()
+        filters = {}
+        if taxonomy_category:
+            filters["taxonomy_category"] = taxonomy_category
+        if taxonomy_topic:
+            filters["taxonomy_topic"] = taxonomy_topic
+
         hits = []
         error = ""
         if q:
             try:
-                hits = search_chunks(self.db, q, self.settings.search, limit=limit, mode=mode)
+                hits = search_chunks(
+                    self.db,
+                    q,
+                    self.settings.search,
+                    limit=limit,
+                    mode=mode,
+                    filters=filters or None,
+                )
             except RuntimeError as exc:
                 error = str(exc)
 
-        content = [_page_header("Search", "Search extracted document chunks locally."), _search_form(q, mode, limit)]
+        content = [
+            _page_header("Search", "Search extracted document chunks locally."),
+            _search_form(
+                q,
+                mode,
+                limit,
+                taxonomy_categories=self.db.list_taxonomy_categories(limit=200),
+                taxonomy_topics=self.db.list_taxonomy_topics(limit=500),
+                selected_category=taxonomy_category,
+                selected_topic=taxonomy_topic,
+            ),
+        ]
         if error:
             content.append(f'<div class="alert">{_e(error)}</div>')
         elif q:
@@ -1105,12 +1131,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not q:
             self._json({"query": q, "results": []})
             return
+
+        filters = {}
+        taxonomy_category = _first(query, "taxonomy_category").strip()
+        taxonomy_topic = _first(query, "taxonomy_topic").strip()
+        if taxonomy_category:
+            filters["taxonomy_category"] = taxonomy_category
+        if taxonomy_topic:
+            filters["taxonomy_topic"] = taxonomy_topic
+
         try:
-            hits = search_chunks(self.db, q, self.settings.search, limit=limit, mode=mode)
+            hits = search_chunks(
+                self.db,
+                q,
+                self.settings.search,
+                limit=limit,
+                mode=mode,
+                filters=filters or None,
+            )
         except (RuntimeError, ValueError) as exc:
             self._json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
-        self._json({"query": q, "mode": mode, "results": [asdict(hit) for hit in hits]})
+        self._json({
+            "query": q,
+            "mode": mode,
+            "filters": filters,
+            "results": [asdict(hit) for hit in hits],
+        })
 
     def _stats_payload(self) -> dict:
         raw = self.db.stats()
