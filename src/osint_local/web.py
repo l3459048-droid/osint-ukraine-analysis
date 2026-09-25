@@ -40,6 +40,7 @@ from .taxonomy import taxonomy_is_stale
 from .web_ui import (
     _action_panel,
     _activity_details,
+    _adaptive_category_list,
     _ask_form,
     _category_list,
     _chat_messages,
@@ -787,6 +788,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         stats = self._stats_payload()
         action = self.server.actions.snapshot()
         recent = self.db.list_documents(limit=12)
+        adaptive_categories = self.db.list_taxonomy_categories(limit=12)
         semantic_available = importlib.util.find_spec("sentence_transformers") is not None
         semantic_ready = bool(stats["chunks"] and stats["embedding_count"] >= stats["chunks"])
         body = [_hero()]
@@ -813,8 +815,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "</section>",
             _search_form("", "auto", 10),
             '<div class="two-col">',
-            '<section class="panel"><div class="panel-head"><h2>Categories</h2></div>',
-            _category_list(stats["categories"]),
+            (
+                '<section class="panel"><div class="panel-head"><h2>Adaptive categories</h2><a href="/taxonomy">Corpus</a></div>'
+                if adaptive_categories
+                else '<section class="panel"><div class="panel-head"><h2>Rule-based categories</h2><a href="/taxonomy">Corpus</a></div>'
+            ),
+            (
+                _adaptive_category_list(adaptive_categories)
+                if adaptive_categories
+                else _category_list(stats["categories"])
+            ),
             "</section>",
             '<section class="panel"><div class="panel-head"><h2>Recent documents</h2>'
             '<a href="/documents">View all</a></div>',
