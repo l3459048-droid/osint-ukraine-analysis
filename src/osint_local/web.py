@@ -332,6 +332,7 @@ class ManualTranslationManager:
             "sha256": "",
             "source_lang": "",
             "target_lang": "ru",
+            "engine": "auto",
             "current": 0,
             "total": 0,
             "message": "Ready",
@@ -343,11 +344,20 @@ class ManualTranslationManager:
         with self._lock:
             return dict(self._state)
 
-    def start(self, sha256: str, source_lang: str, target_lang: str = "ru") -> dict:
+    def start(
+        self,
+        sha256: str,
+        source_lang: str,
+        target_lang: str = "ru",
+        engine: str = "auto",
+    ) -> dict:
         source_lang = str(source_lang or "auto").strip().casefold()
         target_lang = str(target_lang or "ru").strip().casefold()
+        engine = str(engine or "auto").strip().casefold()
         if source_lang not in {"auto", "en", "uk"} or target_lang != "ru":
             raise ValueError("Translation is limited to English/Ukrainian → Russian")
+        if engine not in {"auto", "quality", "fast", "argos"}:
+            raise ValueError("Unknown translation engine")
 
         with self._lock:
             if self._state.get("status") == "running":
@@ -358,9 +368,10 @@ class ManualTranslationManager:
                 "sha256": sha256,
                 "source_lang": source_lang,
                 "target_lang": target_lang,
+                "engine": engine,
                 "current": 0,
                 "total": 0,
-                "message": "Starting translation…",
+                "message": f"Starting {engine.title()} translation…",
                 "error": "",
                 "result": None,
             }
@@ -369,7 +380,7 @@ class ManualTranslationManager:
                 self.gate.acquire()
             threading.Thread(
                 target=self._worker_guarded,
-                args=(sha256, source_lang, target_lang),
+                args=(sha256, source_lang, target_lang, engine),
                 name="osint-local-manual-translate",
                 daemon=True,
             ).start()
@@ -384,17 +395,29 @@ class ManualTranslationManager:
 
     def _other_interactive_busy(self) -> bool:
         # This translation owns one gate reference while running. A count > 1
-        # means Chat/Ask/Fast Setup also needs priority, so pause at a safe batch.
+        # means Chat/Ask/model setup also needs priority, so pause at a safe batch.
         return self.gate is not None and self.gate.count() > 1
 
-    def _worker_guarded(self, sha256: str, source_lang: str, target_lang: str) -> None:
+    def _worker_guarded(
+        self,
+        sha256: str,
+        source_lang: str,
+        target_lang: str,
+        engine: str,
+    ) -> None:
         try:
-            self._worker(sha256, source_lang, target_lang)
+            self._worker(sha256, source_lang, target_lang, engine)
         finally:
             if self.gate is not None:
                 self.gate.release()
 
-    def _worker(self, sha256: str, source_lang: str, target_lang: str) -> None:
+    def _worker(
+        self,
+        sha256: str,
+        source_lang: str,
+        target_lang: str,
+        engine: str,
+    ) -> None:
         try:
             result = translate_document(
                 self.pipeline.settings,
@@ -404,7 +427,7 @@ class ManualTranslationManager:
                 target_lang=target_lang,
                 progress=self._progress,
                 should_pause=self._other_interactive_busy,
-                engine="auto",
+                engine=engine,
             )
         except Exception as exc:
             with self._lock:
@@ -427,7 +450,6 @@ class ManualTranslationManager:
                 error="",
                 result=result,
             )
-
 
 class FastSetupManager:
     """Prepare Fast Translation models independently from library maintenance."""
@@ -946,9 +968,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.server.csrf_token,
                 sha256,
                 self.db.list_translations(sha256),
-                available=argos_available() or fast_translation_available(),
+                available=(
+                    argos_available()
+                    or fast_translation_available()
+                    or quality_translation_available()
+                ),
                 pairs=(installed_pairs() if argos_available() else set()) | (
                     fast_ready_pairs(self.settings) if fast_translation_available() else set()
+                ) | (
+                    {("en", "ru"), ("uk", "ru")}
+                    if quality_translation_available() and quality_model_ready(self.settings)
+                    else set()
+                ),
+                quality_ready=(
+                    quality_translation_available()
+                    and quality_model_ready(self.settings)
                 ),
                 action=self.server.translation.snapshot(),
             ),
@@ -1239,19 +1273,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not SHA_RE.fullmatch(sha256) or not self.db.get_document(sha256):
             self._action_response({"error": "Document not found"}, status=HTTPStatus.NOT_FOUND)
             return
-        source_lang = data.get("source_lang", "auto")
+        source_lang = data.get("source_lang", "auto").strip().casefold()
+        engine = data.get("engine", "auto").strip().casefold()
         target_lang = "ru"
         if source_lang not in {"auto", "en", "uk"}:
             self._action_response({"error": "Translation is limited to English/Ukrainian → Russian"}, status=HTTPStatus.BAD_REQUEST)
             return
-        if not argos_available() and not fast_translation_available():
+        if engine not in {"auto", "quality", "fast", "argos"}:
+            self._action_response({"error": "Unknown translation engine"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if engine == "quality" and not (
+            quality_translation_available() and quality_model_ready(self.settings)
+        ):
+            self._action_response(
+                {"error": "Quality Translation is not prepared. Open System and click Prepare Quality."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if engine == "fast" and not fast_translation_available():
+            self._action_response(
+                {"error": "Fast Translation dependencies are missing. Run UPDATE_OSINT.cmd."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if (
+            engine == "auto"
+            and not argos_available()
+            and not fast_translation_available()
+            and not quality_translation_available()
+        ):
             self._action_response(
                 {"error": "No offline translation engine is installed. Run UPDATE_OSINT.cmd first."},
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
         try:
-            translation = self.server.translation.start(sha256, source_lang, target_lang)
+            translation = self.server.translation.start(
+                sha256,
+                source_lang,
+                target_lang,
+                engine=engine,
+            )
         except (ActionBusyError, ValueError) as exc:
             self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
