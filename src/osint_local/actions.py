@@ -101,7 +101,7 @@ class ActionManager:
                 "translate": "Translation complete",
             }
             if self._state.kind == "maintenance" and result.get("paused"):
-                self._state.message = "Background paused for Chat/Ask"
+                self._state.message = "Background paused for interactive work"
             elif self._state.kind == "maintenance":
                 counts = result.get("counts") or {}
                 changed = (
@@ -168,7 +168,7 @@ class ActionManager:
     def _run_maintenance(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
         if self.interactive_busy():
-            self._progress(0, 0, "Background paused for Chat/Ask")
+            self._progress(0, 0, "Background paused for interactive work")
             return {
                 "paused": True,
                 "files_seen": 0,
@@ -189,7 +189,7 @@ class ActionManager:
         embedded = 0
         settings = self.pipeline.settings
         if self.interactive_busy():
-            self._progress(0, 0, "Background paused for Chat/Ask")
+            self._progress(0, 0, "Background paused for interactive work")
             return {
                 "paused": True,
                 "files_seen": len(results),
@@ -215,7 +215,7 @@ class ActionManager:
                     f"Checking translation queue… {item_index}/{max_per_cycle}",
                 )
                 if self.interactive_busy():
-                    self._progress(0, 0, "Background paused for Chat/Ask")
+                    self._progress(0, 0, "Background paused for interactive work")
                     break
                 item = next_passive_translation(
                     settings,
