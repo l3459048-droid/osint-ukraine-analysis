@@ -2720,3 +2720,33 @@ def test_manual_translation_ui_defaults_to_prepared_quality_engine(tmp_path: Pat
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_full_quality_translation_preserves_form_units_and_page_boundaries():
+    import osint_local.translation as translation
+
+    class FakeQuality:
+        def translate_texts(self, texts):
+            return ["RU[" + value + "]" for value in texts]
+
+    sections = [
+        (
+            1,
+            "Ректор __________________ Ярослав КІЧУК\n"
+            "протокол № __ від «__» ______ 2026 р.\n"
+            "Звичайне довше речення продовжується\n"
+            "на наступному рядку.",
+        ),
+        (2, "ПЕРЕДМОВА"),
+    ]
+
+    result = translation._translate_sections_quality(sections, FakeQuality())
+
+    assert [page for page, _ in result] == [1, 2]
+    page_one = result[0][1]
+    assert "RU[Ректор" in page_one
+    assert "RU[протокол №" in page_one
+    assert "Звичайне довше речення продовжується на наступному рядку." in page_one
+    assert "\n\n" in page_one
+    assert result[1][1] == "RU[ПЕРЕДМОВА]"
