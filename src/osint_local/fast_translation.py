@@ -410,8 +410,10 @@ def _degeneracy_score(source: str, translated: str) -> int:
         score += 4
 
     token_fragments = re.findall(r"(?<!\w)[^\s_]{1,16}_(?=\s|$)", translated)
-    if len(token_fragments) >= 6:
+    if len(token_fragments) >= 4:
         score += 4
+    elif len(token_fragments) >= 2:
+        score += 2
     return score
 
 
@@ -429,7 +431,7 @@ def _translation_quality_score(
 
     source_visible = len(re.sub(r"\s+", "", source))
     translated_visible = len(re.sub(r"\s+", "", translated))
-    if source_visible >= 60:
+    if source_visible >= 30:
         ratio = translated_visible / max(1, source_visible)
         if ratio < 0.45 or ratio > 1.95:
             score += 2
@@ -455,7 +457,7 @@ def _translation_quality_score(
 
     if target_lang == "ru":
         alpha = [char for char in translated if char.isalpha()]
-        if len(alpha) >= 20:
+        if len(alpha) >= 8:
             cyrillic = sum(
                 ("А" <= char <= "я") or char in "ЁёІіЇїЄєҐґ"
                 for char in alpha
@@ -897,7 +899,7 @@ def _looks_like_layout_field(line: str) -> bool:
         or bool(URL_RE.search(value))
         or bool(re.match(r"^\d{1,3}[.)]\s+", value))
         or (":" in value[:80] and len(value) <= 180)
-        or (len(value) <= 70 and not re.search(r"[,;—-]\s*$", value))
+        or (len(value) <= 70 and not re.search(r"[.!?…,:;—-]\s*$", value))
     )
 
 
