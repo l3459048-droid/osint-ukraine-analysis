@@ -21,6 +21,7 @@ from .fast_translation import (
 from .quality_translation import (
     QUALITY_MODEL_ID,
     QualityTranslator,
+    load_quality_benchmark,
     quality_model_ready,
     quality_translation_available,
 )
@@ -620,6 +621,9 @@ def translation_queue_status(settings, db, *, available_pairs=None, limit: int =
         "fast_available": fast_translation_available(),
         "fast_pairs": sorted(f"{src}->{dst}" for src, dst in fast_pairs),
         "fast_benchmarks": benchmarks,
+        "quality_available": quality_translation_available(),
+        "quality_ready": quality_model_ready(settings),
+        "quality_benchmark": load_quality_benchmark(settings),
     }
 
 
