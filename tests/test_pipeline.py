@@ -2367,3 +2367,23 @@ def test_translation_quality_score_penalizes_ukrainian_residue_for_ru():
         untranslated,
         target_lang="ru",
     ) >= 2
+
+
+
+def test_translation_quality_score_rejects_untranslated_english_for_ru():
+    import osint_local.fast_translation as fast
+
+    source = "The educational programme takes effect on 01.09.2026."
+    untranslated = "The educational programme takes effect on 01.09.2026."
+    translated = "Образовательная программа вводится в действие 01.09.2026."
+
+    assert fast._translation_quality_score(
+        source,
+        translated,
+        target_lang="ru",
+    ) == 0
+    assert fast._translation_quality_score(
+        source,
+        untranslated,
+        target_lang="ru",
+    ) >= 4
