@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from array import array
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -24,6 +25,20 @@ STOPWORDS = {
 }
 
 TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ][\w'’-]{2,}", re.UNICODE)
+
+
+def _wait_while_paused(
+    should_pause: Callable[[], bool] | None,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> None:
+    if should_pause is None:
+        return
+    announced = False
+    while should_pause():
+        if progress is not None and not announced:
+            progress(0, 0, "Taxonomy paused for Chat/Ask…")
+            announced = True
+        time.sleep(0.2)
 
 
 def taxonomy_available(db, search_config: dict) -> bool:
@@ -56,6 +71,7 @@ def build_adaptive_taxonomy(
     qa_config: dict,
     *,
     progress: Callable[[int, int, str], None] | None = None,
+    should_pause: Callable[[], bool] | None = None,
     labeler: Callable[[str, list[dict[str, Any]]], dict[str, dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
     model = str(search_config.get("model") or "").strip()
@@ -82,7 +98,12 @@ def build_adaptive_taxonomy(
     try:
         if progress:
             progress(0, 6, "Building document semantic vectors…")
-        documents = _document_vectors(db, model)
+        documents = _document_vectors(
+            db,
+            model,
+            should_pause=should_pause,
+            progress=progress,
+        )
         if len(documents) < min_documents:
             raise RuntimeError(
                 f"Only {len(documents)} documents have semantic embeddings; "
@@ -96,6 +117,7 @@ def build_adaptive_taxonomy(
 
         if progress:
             progress(1, 6, "Discovering semantic topics…")
+        _wait_while_paused(should_pause, progress)
         raw_topics = _cluster_items(
             documents,
             similarity_threshold=topic_threshold,
@@ -123,10 +145,13 @@ def build_adaptive_taxonomy(
             qa_config,
             previous=previous_topics,
             labeler=labeler,
+            should_pause=should_pause,
+            progress=progress,
         )
 
         if progress:
             progress(3, 6, "Grouping topics into broader categories…")
+        _wait_while_paused(should_pause, progress)
         category_threshold = float(taxonomy_config.get("category_similarity", 0.48))
         category_merge = float(taxonomy_config.get("category_merge_similarity", 0.70))
         max_categories = max(2, int(taxonomy_config.get("max_categories", 24) or 24))
@@ -155,6 +180,8 @@ def build_adaptive_taxonomy(
             qa_config,
             previous=previous_categories,
             labeler=labeler,
+            should_pause=should_pause,
+            progress=progress,
         )
 
         category_by_topic: dict[str, str] = {}
@@ -167,6 +194,7 @@ def build_adaptive_taxonomy(
 
         if progress:
             progress(4, 6, "Assigning documents to topics and categories…")
+        _wait_while_paused(should_pause, progress)
         primary_topic: dict[str, str] = {}
         for topic in topic_records:
             for member in topic["cluster"]["members"]:
@@ -317,6 +345,7 @@ def refresh_adaptive_taxonomy(
     taxonomy_config: dict,
     *,
     progress: Callable[[int, int, str], None] | None = None,
+    should_pause: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Refresh document assignments and request full discovery only when needed."""
     model = str(search_config.get("model") or "").strip()
@@ -345,7 +374,12 @@ def refresh_adaptive_taxonomy(
 
     if progress:
         progress(0, 3, "Refreshing taxonomy assignments…")
-    documents = _document_vectors(db, model)
+    documents = _document_vectors(
+        db,
+        model,
+        should_pause=should_pause,
+        progress=progress,
+    )
     topic_records = [
         {
             "key": str(row["topic_key"]),
@@ -370,6 +404,7 @@ def refresh_adaptive_taxonomy(
             "reason": "taxonomy_centroids_missing",
         }
 
+    _wait_while_paused(should_pause, progress)
     assignments = _assign_documents_to_taxonomy(
         documents,
         topic_records,
@@ -583,10 +618,17 @@ def _assign_documents_to_taxonomy(
     }
 
 
-def _document_vectors(db, model: str) -> list[dict[str, Any]]:
+def _document_vectors(
+    db,
+    model: str,
+    *,
+    should_pause: Callable[[], bool] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> list[dict[str, Any]]:
     aggregates: dict[str, dict[str, Any]] = {}
 
     for batch in db.embedding_batches(model, batch_size=500):
+        _wait_while_paused(should_pause, progress)
         for row in batch:
             vector = _blob_to_vector(row["vector"])
             if not vector:
@@ -713,6 +755,8 @@ def _materialize_topics(
     *,
     previous=(),
     labeler=None,
+    should_pause: Callable[[], bool] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict[str, Any]]:
     document_by_id = {str(item["id"]): item for item in documents}
     candidates: list[dict[str, Any]] = []
@@ -760,6 +804,8 @@ def _materialize_topics(
         taxonomy_config,
         qa_config,
         labeler=labeler,
+        should_pause=should_pause,
+        progress=progress,
     )
     _apply_labels(candidates, labels)
     return candidates
@@ -773,6 +819,8 @@ def _materialize_categories(
     *,
     previous=(),
     labeler=None,
+    should_pause: Callable[[], bool] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict[str, Any]]:
     topic_by_key = {topic["key"]: topic for topic in topics}
     candidates: list[dict[str, Any]] = []
@@ -818,6 +866,8 @@ def _materialize_categories(
         taxonomy_config,
         qa_config,
         labeler=labeler,
+        should_pause=should_pause,
+        progress=progress,
     )
     _apply_labels(candidates, labels)
     return candidates
@@ -830,6 +880,8 @@ def _labels(
     qa_config: dict,
     *,
     labeler=None,
+    should_pause: Callable[[], bool] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, dict[str, str]]:
     pending = [
         item for item in candidates
@@ -839,13 +891,21 @@ def _labels(
         return {}
     if labeler is not None:
         try:
+            _wait_while_paused(should_pause, progress)
             return labeler(kind, pending) or {}
         except Exception:
             return {}
     if not bool(taxonomy_config.get("label_with_ollama", True)):
         return {}
     try:
-        return _ollama_labels(kind, pending, taxonomy_config, qa_config)
+        return _ollama_labels(
+            kind,
+            pending,
+            taxonomy_config,
+            qa_config,
+            should_pause=should_pause,
+            progress=progress,
+        )
     except Exception:
         return {}
 
@@ -855,6 +915,9 @@ def _ollama_labels(
     candidates: list[dict[str, Any]],
     taxonomy_config: dict,
     qa_config: dict,
+    *,
+    should_pause: Callable[[], bool] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, dict[str, str]]:
     base_url = str(qa_config.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
     model = str(qa_config.get("model") or "").strip()
@@ -868,6 +931,7 @@ def _ollama_labels(
 
     selected = candidates[:max_labels]
     for offset in range(0, len(selected), batch_size):
+        _wait_while_paused(should_pause, progress)
         batch = selected[offset:offset + batch_size]
         payload = [
             {
