@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.17
+# OSINT Ukraine Analysis — local-first v0.9.18
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.17
+## Что делает v0.9.18
 
 ```text
 папка документов
@@ -98,6 +98,14 @@ osint-local translate <SHA256> --from auto
 ```
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
+
+## Layout-preserving translated PDF v0.9.18
+
+Quality-перевод PDF теперь использует persistent layout artifact как источник translation units: M2M100 переводит стабильные PDF-блоки с их `block id` и `bbox`, а Markdown/Reader собирается из тех же результатов. Рядом с Markdown сохраняется `*.layout.json`, содержащий source/translated text каждого блока и исходную геометрию.
+
+На странице документа для PDF появился экспорт **PDF · layout**. Renderer открывает исходный PDF, удаляет только исходный text layer внутри переведённых bbox через transparent redactions, при этом не удаляет изображения и vector graphics, и затем вписывает русский текст обратно в исходные области. Размер страницы, линии формы и исходная геометрия сохраняются. Шрифт автоматически уменьшается, если русский текст длиннее исходного; статистика shrink/overflow сохраняется рядом с PDF в `*.layout.pdf.json`.
+
+Layout PDF не строится из Markdown. Для старого перевода без block map нужно заново выполнить Quality-перевод PDF, после чего экспорт станет доступен.
 
 ## Quality Translation + protected facts + persistent PDF layout v0.9.17
 
