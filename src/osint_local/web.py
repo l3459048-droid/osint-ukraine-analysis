@@ -32,7 +32,10 @@ from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
 from .search import search_chunks
 from .translation import argos_available, installed_pairs, translate_document, translation_queue_status
-from .translation_export import export_translation_docx
+from .translation_export import (
+    export_translation_docx,
+    export_translation_layout_pdf,
+)
 from .web_ui import (
     _action_panel,
     _activity_details,
@@ -984,6 +987,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     quality_translation_available()
                     and quality_model_ready(self.settings)
                 ),
+                source_extension=str(doc["extension"] or ""),
                 action=self.server.translation.snapshot(),
             ),
             '<section class="panel"><div class="panel-head"><h2>Extracted chunks</h2></div>',
@@ -1499,25 +1503,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _translation_export(self, path: str) -> None:
         parts = path.strip("/").split("/")
-        if len(parts) != 5 or parts[0] != "translation-export" or parts[4] != "docx":
+        if len(parts) != 5 or parts[0] != "translation-export":
             self._error(HTTPStatus.NOT_FOUND, "Translation export not found")
             return
-        _, sha256, source_lang, target_lang, _ = parts
+        _, sha256, source_lang, target_lang, export_kind = parts
         if (
             not SHA_RE.fullmatch(sha256)
             or source_lang not in {"en", "uk"}
             or target_lang != "ru"
+            or export_kind not in {"docx", "pdf-layout"}
         ):
             self._error(HTTPStatus.NOT_FOUND, "Translation export not found")
             return
         try:
-            output_path = export_translation_docx(
-                self.settings,
-                self.db,
-                sha256,
-                source_lang,
-                target_lang,
-            )
+            if export_kind == "docx":
+                output_path = export_translation_docx(
+                    self.settings,
+                    self.db,
+                    sha256,
+                    source_lang,
+                    target_lang,
+                )
+                content_type = (
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+            else:
+                output_path = export_translation_layout_pdf(
+                    self.settings,
+                    self.db,
+                    sha256,
+                    source_lang,
+                    target_lang,
+                )
+                content_type = "application/pdf"
         except RuntimeError as exc:
             message = str(exc)
             status = (
@@ -1530,9 +1548,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send_file(
             output_path,
             head_only=False,
-            content_type_override=(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            ),
+            content_type_override=content_type,
             disposition="attachment",
         )
 
