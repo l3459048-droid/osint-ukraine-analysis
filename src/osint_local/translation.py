@@ -139,6 +139,8 @@ def translate_document(
                     "pages_per_minute": round(fast_stats.pages_per_minute, 2),
                     "elapsed_seconds": round(fast_stats.elapsed_seconds, 3),
                     "chars_translated": fast_stats.chars_translated,
+                    "chars_per_second": round(fast_stats.chars_per_second, 2),
+                    "page_batch": fast_stats.page_batch,
                 }
             elif selected_engine == "fast":
                 raise RuntimeError(
