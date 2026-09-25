@@ -266,6 +266,16 @@ def build_adaptive_taxonomy(
             "last_refresh_mode": "full",
             "last_full_rebuild_at": finished_at,
             "incremental_refreshes_since_discovery": 0,
+            "incremental_refresh_limit": max(
+                1,
+                int(
+                    taxonomy_config.get(
+                        "full_rebuild_after_incremental_refreshes",
+                        20,
+                    )
+                    or 20
+                ),
+            ),
             "growth_trigger": growth_trigger,
             "unassigned_trigger": unassigned_trigger,
             "documents_with_vectors": len(documents),
