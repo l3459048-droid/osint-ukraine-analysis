@@ -332,10 +332,10 @@ def _degeneracy_score(source: str, translated: str) -> int:
     score = 0
     if len(translated) > max(240, int(len(source) * 2.4)):
         score += 2
-    if re.search(r"(.)\\1{5,}", translated, flags=re.IGNORECASE):
+    if re.search(r"(.)\1{5,}", translated, flags=re.IGNORECASE):
         score += 3
 
-    words = re.findall(r"[^\\W_]+", translated.casefold(), flags=re.UNICODE)
+    words = re.findall(r"[^\W_]+", translated.casefold(), flags=re.UNICODE)
     run = 1
     max_run = 1
     for previous, current in zip(words, words[1:]):
@@ -347,7 +347,7 @@ def _degeneracy_score(source: str, translated: str) -> int:
     if max_run >= 4:
         score += 4
 
-    token_fragments = re.findall(r"(?<!\\w)[^\\s_]{1,16}_(?=\\s|$)", translated)
+    token_fragments = re.findall(r"(?<!\w)[^\s_]{1,16}_(?=\s|$)", translated)
     if len(token_fragments) >= 6:
         score += 4
     return score
