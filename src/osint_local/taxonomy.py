@@ -584,40 +584,54 @@ def _assign_documents_to_taxonomy(
 
 
 def _document_vectors(db, model: str) -> list[dict[str, Any]]:
-    grouped_vectors: dict[str, list[list[float]]] = defaultdict(list)
-    grouped_text: dict[str, list[str]] = defaultdict(list)
-    paths: dict[str, str] = {}
+    aggregates: dict[str, dict[str, Any]] = {}
 
-    for row in db.iter_embeddings(model):
-        sha256 = str(row["document_sha256"])
-        grouped_vectors[sha256].append(_blob_to_vector(row["vector"]))
-        if len(grouped_text[sha256]) < 5:
+    for batch in db.embedding_batches(model, batch_size=500):
+        for row in batch:
+            vector = _blob_to_vector(row["vector"])
+            if not vector:
+                continue
+
+            sha256 = str(row["document_sha256"])
+            state = aggregates.get(sha256)
+            if state is None:
+                state = {
+                    "sum": [0.0] * len(vector),
+                    "count": 0,
+                    "texts": [],
+                    "source_path": str(row["source_path"] or ""),
+                }
+                aggregates[sha256] = state
+
+            if len(state["sum"]) != len(vector):
+                # Ignore a malformed/mixed-dimension row without poisoning the
+                # entire document centroid.
+                continue
+
+            for index, value in enumerate(vector):
+                state["sum"][index] += float(value)
+            state["count"] += 1
+
             text = str(row["text"] or "").strip()
-            if text:
-                grouped_text[sha256].append(text[:1200])
-        paths[sha256] = str(row["source_path"] or "")
+            if text and len(state["texts"]) < 5:
+                state["texts"].append(text[:1200])
 
     documents: list[dict[str, Any]] = []
-    for sha256 in sorted(grouped_vectors):
-        vectors = grouped_vectors[sha256]
-        if not vectors:
-            continue
-        dimension = len(vectors[0])
-        if not dimension or any(len(vector) != dimension for vector in vectors):
+    for sha256 in sorted(aggregates):
+        state = aggregates[sha256]
+        count = int(state["count"])
+        if count <= 0:
             continue
         centroid = _normalize(
-            [
-                sum(vector[index] for vector in vectors) / len(vectors)
-                for index in range(dimension)
-            ]
+            [value / count for value in state["sum"]]
         )
         documents.append(
             {
                 "id": sha256,
                 "vector": centroid,
                 "weight": 1,
-                "source_path": paths.get(sha256, ""),
-                "text": "\n".join(grouped_text.get(sha256, [])),
+                "source_path": state["source_path"],
+                "text": "\n".join(state["texts"]),
             }
         )
     return documents
