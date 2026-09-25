@@ -171,6 +171,8 @@
     "full_rebuild_growth_ratio": 0.1,
     "discovery_min_unassigned": 8,
     "discovery_unassigned_ratio": 0.03,
-    "full_rebuild_after_incremental_refreshes": 20
+    "full_rebuild_after_incremental_refreshes": 20,
+    "topic_manual_override_similarity": 0.9,
+    "category_manual_override_similarity": 0.86
   }
 }
