@@ -1106,6 +1106,8 @@ def _reuse_previous_labels(
         key=lambda item: int(item.get("document_count") or 0),
         reverse=True,
     ):
+        if bool(candidate.get("label_locked")):
+            continue
         best_index = -1
         best_score = float(threshold)
         for index, old in enumerate(previous_items):
