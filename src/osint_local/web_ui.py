@@ -346,6 +346,8 @@ def _ask_form(
     analysis_mode: str = "quick",
     *,
     categories=None,
+    taxonomy_categories=None,
+    taxonomy_topics=None,
     folders=None,
     documents=None,
 ) -> str:
@@ -359,9 +361,17 @@ def _ask_form(
         f'<option value="{name}"{" selected" if name == analysis_mode else ""}>{label}</option>'
         for name, label in modes
     )
-    category_options = '<option value="">All categories</option>' + "".join(
+    category_options = '<option value="">All rule-based categories</option>' + "".join(
         f'<option value="{_e(row["domain"])}">{_e(row["domain"])} ({int(row["documents"])})</option>'
         for row in (categories or [])
+    )
+    taxonomy_category_options = '<option value="">All adaptive categories</option>' + "".join(
+        f'<option value="{_e(row["category_key"])}">{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in (taxonomy_categories or [])
+    )
+    taxonomy_topic_options = '<option value="">All discovered topics</option>' + "".join(
+        f'<option value="{_e(row["topic_key"])}">{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in (taxonomy_topics or [])
     )
     folder_options = '<option value="">All folders</option>' + "".join(
         f'<option value="{_e(folder)}">{_e(folder)}</option>' for folder in (folders or [])
@@ -381,12 +391,14 @@ def _ask_form(
 <label>Period<select name="period"><option value="">Any time</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option></select></label>
 <label>From<input type="date" name="date_from"></label>
 <label>To<input type="date" name="date_to"></label>
-<label>Category<select name="domain">{category_options}</select></label>
+<label>Rule category<select name="domain">{category_options}</select></label>
+<label>Adaptive category<select name="taxonomy_category">{taxonomy_category_options}</select></label>
+<label>Topic<select name="taxonomy_topic">{taxonomy_topic_options}</select></label>
 <label>Folder<select name="folder">{folder_options}</select></label>
 <label>Language<select name="language"><option value="">Any language</option><option value="en">English</option><option value="uk">Ukrainian</option><option value="ru">Russian</option></select></label>
 <label class="ask-documents">Specific documents<select name="documents_multi" multiple size="6" data-documents-select>{document_options}</select></label>
 </div>
-<div class="ask-filter-note">Date filters use the source file modification date. Custom From/To dates override the period shortcut. Multiple filters are combined.</div>
+<div class="ask-filter-note">Date filters use the source file modification date. Adaptive categories/topics come from the Corpus taxonomy. Custom From/To dates override the period shortcut. Multiple filters are combined.</div>
 </details>
 </form>
 <div class="ask-hint">Быстро — короткий ответ · Глубокий — больше источников · Сравнение и противоречия — приоритет нескольким документам.</div>
