@@ -978,7 +978,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         documents = []
         if show_unassigned:
-            documents = self.db.taxonomy_unassigned_documents(limit=300)
+            documents = self.db.taxonomy_unassigned_documents(
+                model=str(self.settings.search.get("model") or ""),
+                limit=300,
+            )
         elif topic_key:
             documents = self.db.taxonomy_documents(
                 topic_key=topic_key,
