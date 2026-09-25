@@ -36,6 +36,7 @@ from .translation_export import (
     export_translation_docx,
     export_translation_layout_pdf,
 )
+from .taxonomy import taxonomy_is_stale
 from .web_ui import (
     _action_panel,
     _activity_details,
@@ -65,6 +66,8 @@ from .web_ui import (
     _setup_panel,
     _stat_card,
     _translation_panel,
+    _taxonomy_badges,
+    _taxonomy_panel,
 )
 
 LOG = logging.getLogger("osint_local.web")
@@ -676,6 +679,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._search_page(query)
             elif path == "/documents":
                 self._documents_page(query)
+            elif path == "/taxonomy":
+                self._taxonomy_page(query)
             elif path == "/ask":
                 self._ask_page(query)
             elif path == "/chat":
@@ -722,6 +727,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._start_action("scan")
             elif path == "/actions/index":
                 self._start_action("index")
+            elif path == "/actions/taxonomy":
+                self._start_action("taxonomy")
             elif path == "/actions/open-folder":
                 self._open_folder_action()
             elif path == "/actions/open-translations":
@@ -897,6 +904,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
         body.append("</section>")
         self._html(title, "".join(body))
 
+    def _taxonomy_page(self, query: dict[str, list[str]]) -> None:
+        category_key = _first(query, "category").strip()
+        topic_key = _first(query, "topic").strip()
+
+        categories = self.db.list_taxonomy_categories(limit=200)
+        if category_key:
+            topics = self.db.list_taxonomy_topics(
+                category_key=category_key,
+                limit=500,
+            )
+        else:
+            topics = self.db.list_taxonomy_topics(limit=500)
+
+        documents = []
+        if topic_key:
+            documents = self.db.taxonomy_documents(
+                topic_key=topic_key,
+                limit=300,
+            )
+        elif category_key:
+            documents = self.db.taxonomy_documents(
+                category_key=category_key,
+                limit=300,
+            )
+
+        counts = self.db.taxonomy_counts()
+        latest = self.db.latest_taxonomy_run()
+        body = [
+            _page_header(
+                "Corpus",
+                "Automatically discovered semantic categories and topics across the local library.",
+            ),
+            _taxonomy_panel(
+                self.server.csrf_token,
+                categories=categories,
+                topics=topics,
+                documents=documents,
+                counts=counts,
+                latest_run=latest,
+                action=self.server.actions.snapshot(),
+                selected_category=category_key,
+                selected_topic=topic_key,
+            ),
+        ]
+        self._html("Corpus", "".join(body))
+
     def _settings_page(self, query: dict[str, list[str]]) -> None:
         stats = self._stats_payload()
         semantic_available = importlib.util.find_spec("sentence_transformers") is not None
@@ -963,6 +1016,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             '<section class="panel"><div class="panel-head"><h2>Classifications</h2></div>',
             _classification_badges(classes),
             "</section>",
+            '<section class="panel"><div class="panel-head"><h2>Adaptive taxonomy</h2><a href="/taxonomy">Corpus</a></div>',
+            _taxonomy_badges(self.db.taxonomy_for_document(sha256)),
+            "</section>",
             '<section class="panel"><div class="panel-head"><h2>Metadata</h2></div>',
             _metadata_grid(metadata, doc),
             "</section>",
@@ -1021,6 +1077,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _stats_payload(self) -> dict:
         raw = self.db.stats()
         model = str(self.settings.search.get("model") or "")
+        taxonomy = self.db.taxonomy_counts()
         return {
             "documents": self.db.document_count(),
             "statuses": raw["statuses"],
@@ -1030,6 +1087,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "translations_ru": int(raw.get("translations_ru", 0)),
             "errors": int(raw.get("errors", 0)),
             "categories": self.db.category_counts(),
+            "taxonomy_categories": taxonomy["categories"],
+            "taxonomy_topics": taxonomy["topics"],
+            "taxonomy_assigned_documents": taxonomy["assigned_documents"],
         }
 
     def _system_payload(self) -> dict:
@@ -1111,6 +1171,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     )
                     return
                 action = self.server.actions.start_index()
+            elif kind == "taxonomy":
+                model = str(self.settings.search.get("model") or "")
+                if not model or self.db.embedding_count(model) <= 0:
+                    self._action_response(
+                        {"error": "Adaptive taxonomy requires a semantic index. Build the index first."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                action = self.server.actions.start_taxonomy()
             else:
                 self._action_response({"error": "Unknown action"}, status=HTTPStatus.NOT_FOUND)
                 return
