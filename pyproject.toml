@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osint-local"
-version = "0.9.7"
+version = "0.9.8"
 description = "Local-first OSINT document analysis with filtered RAG, fast offline translation and local Ollama chat"
 requires-python = ">=3.10"
 dependencies = [
