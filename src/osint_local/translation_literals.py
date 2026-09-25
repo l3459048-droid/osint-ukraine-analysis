@@ -47,6 +47,10 @@ def protect_literals(text: str) -> LiteralProtection:
     last = 0
     for index, match in enumerate(matches, 1):
         placeholder = f"ZXQLIT{index:04d}QXZ"
+        collision_index = 0
+        while placeholder in source:
+            collision_index += 1
+            placeholder = f"ZXQLIT{index:04d}QXZC{collision_index}ZXQ"
         pieces.append(source[last:match.start()])
         pieces.append(placeholder)
         literals.append(
