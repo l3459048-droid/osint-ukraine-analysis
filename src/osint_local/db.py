@@ -968,28 +968,34 @@ class Database:
     def taxonomy_unassigned_documents(
         self,
         *,
+        model: str | None = None,
         limit: int = 300,
     ) -> list[sqlite3.Row]:
         limit = max(1, min(5000, int(limit)))
+        model = str(model or "").strip()
+        embedding_condition = "AND e.model=?" if model else ""
+        params: list[Any] = [model] if model else []
+        params.append(limit)
         with self._lock:
             return self.conn.execute(
-                """SELECT d.*, 0.0 AS taxonomy_score
-                   FROM documents d
-                   WHERE d.status='done'
-                     AND EXISTS (
-                         SELECT 1
-                         FROM chunks c
-                         JOIN embeddings e ON e.chunk_id=c.id
-                         WHERE c.document_sha256=d.sha256
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1
-                         FROM document_taxonomy_topics dtt
-                         WHERE dtt.document_sha256=d.sha256
-                     )
-                   ORDER BY d.processed_at DESC, d.source_path
-                   LIMIT ?""",
-                (limit,),
+                f"""SELECT d.*, 0.0 AS taxonomy_score
+                    FROM documents d
+                    WHERE d.status='done'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM chunks c
+                          JOIN embeddings e ON e.chunk_id=c.id
+                          WHERE c.document_sha256=d.sha256
+                          {embedding_condition}
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM document_taxonomy_topics dtt
+                          WHERE dtt.document_sha256=d.sha256
+                      )
+                    ORDER BY d.processed_at DESC, d.source_path
+                    LIMIT ?""",
+                tuple(params),
             ).fetchall()
 
     def taxonomy_for_document(self, sha256: str) -> dict[str, list[sqlite3.Row]]:
