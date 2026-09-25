@@ -882,6 +882,8 @@ class Database:
             raise ValueError("Taxonomy item not found")
 
         with self._lock:
+            clean_name = str(name or "").strip()
+            clean_description = str(description or "").strip()
             self.conn.execute(
                 """INSERT INTO taxonomy_label_overrides
                    (kind, source_key, name, description, centroid, dimension,
@@ -896,14 +898,38 @@ class Database:
                 (
                     kind,
                     source_key,
-                    str(name or "").strip(),
-                    str(description or "").strip(),
+                    clean_name,
+                    clean_description,
                     row[centroid_key],
                     int(row[dimension_key] or 0),
                     updated_at,
                     updated_at,
                 ),
             )
+            if kind == "category":
+                self.conn.execute(
+                    """UPDATE taxonomy_categories
+                       SET name=?, description=?, source='manual', updated_at=?
+                       WHERE category_key=?""",
+                    (
+                        clean_name,
+                        clean_description,
+                        updated_at,
+                        source_key,
+                    ),
+                )
+            else:
+                self.conn.execute(
+                    """UPDATE taxonomy_topics
+                       SET name=?, description=?, source='manual', updated_at=?
+                       WHERE topic_key=?""",
+                    (
+                        clean_name,
+                        clean_description,
+                        updated_at,
+                        source_key,
+                    ),
+                )
             self.conn.commit()
 
     def list_taxonomy_label_overrides(
