@@ -411,6 +411,32 @@ class Database:
                 [model, *params],
             ).fetchall()
 
+    def embedding_batches(
+        self,
+        model: str,
+        *,
+        batch_size: int = 500,
+    ):
+        batch_size = max(50, min(5000, int(batch_size)))
+        last_chunk_id = 0
+        while True:
+            with self._lock:
+                rows = self.conn.execute(
+                    """SELECT c.id AS chunk_id, c.document_sha256, d.source_path,
+                              c.page, c.chunk_index, c.text, e.vector, e.dimension
+                       FROM embeddings e
+                       JOIN chunks c ON c.id=e.chunk_id
+                       JOIN documents d ON d.sha256=c.document_sha256
+                       WHERE e.model=? AND d.status='done' AND c.id>?
+                       ORDER BY c.id
+                       LIMIT ?""",
+                    (model, last_chunk_id, batch_size),
+                ).fetchall()
+            if not rows:
+                break
+            yield rows
+            last_chunk_id = int(rows[-1]["chunk_id"])
+
     def iter_chunks(self, filters: dict | None = None) -> list[sqlite3.Row]:
         clause, params = self._document_filter_clause(filters, alias="d")
         with self._lock:
