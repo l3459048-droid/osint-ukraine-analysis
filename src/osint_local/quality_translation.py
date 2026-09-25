@@ -4,6 +4,7 @@ import importlib.util
 import json
 import shutil
 import time
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Sequence
@@ -239,16 +240,12 @@ class QualityTranslator:
 
         source_prefix = f"__{self.source_lang}__"
         content_limit = max(1, self.max_input_tokens - 1)
-        soft_limit = min(content_limit, self.segment_tokens)
+        sentence_limit = min(content_limit, self.segment_tokens)
         windows: list[list[str]] = []
-        current: list[str] = []
 
-        def flush() -> None:
-            nonlocal current
-            if current:
-                windows.append([source_prefix] + current)
-                current = []
-
+        # M2M100 is used here as the quality tier, so keep semantic units
+        # sentence/form-line sized instead of packing several sentences into
+        # one large request. Only an individually long unit is token-split.
         for raw_unit in _semantic_units(text):
             unit = _clean_translation_unit(raw_unit)
             if not unit:
@@ -256,15 +253,10 @@ class QualityTranslator:
             tokens = list(self.sp.encode(unit, out_type=str))
             if not tokens:
                 continue
-            if len(tokens) > content_limit:
-                flush()
-                for start in range(0, len(tokens), content_limit):
-                    windows.append([source_prefix] + tokens[start:start + content_limit])
-                continue
-            if current and len(current) + len(tokens) > soft_limit:
-                flush()
-            current.extend(tokens)
-        flush()
+            for start in range(0, len(tokens), sentence_limit):
+                window = tokens[start:start + sentence_limit]
+                if window:
+                    windows.append([source_prefix] + window)
         return windows
 
     def _translate_raw(self, text: str) -> str:
@@ -366,9 +358,7 @@ def benchmark_quality_translation(settings) -> dict:
         "source_lang": "uk",
         "target_lang": "ru",
         "quality_model": QUALITY_MODEL_ID,
-        "created_at": __import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        ).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "quality": _engine_benchmark("m2m100-418m-int8", quality, sources, references),
     }
     if fast_model_ready(settings, "uk", "ru"):
