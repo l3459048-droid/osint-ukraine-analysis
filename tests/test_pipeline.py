@@ -3302,7 +3302,14 @@ def test_maintenance_auto_rebuilds_stale_taxonomy_without_reprocessing(tmp_path:
                 [(chunk["id"], settings.search["model"], 2, _vector_to_blob(vector))]
             )
 
-        def fake_build(db, search_config, taxonomy_config, qa_config, progress=None):
+        def fake_build(
+            db,
+            search_config,
+            taxonomy_config,
+            qa_config,
+            progress=None,
+            should_pause=None,
+        ):
             calls.append(True)
             if progress:
                 progress(6, 6, "Adaptive taxonomy ready")
@@ -3713,7 +3720,13 @@ def test_maintenance_uses_incremental_taxonomy_before_full_rebuild(tmp_path: Pat
         monkeypatch.setattr(actions, "taxonomy_is_stale", lambda db, cfg: True)
         calls = []
 
-        def fake_refresh(db, search_config, taxonomy_config, progress=None):
+        def fake_refresh(
+            db,
+            search_config,
+            taxonomy_config,
+            progress=None,
+            should_pause=None,
+        ):
             calls.append("refresh")
             return {
                 "mode": "incremental",
@@ -3853,3 +3866,73 @@ def test_incremental_taxonomy_requests_periodic_full_discovery(tmp_path: Path):
         assert second["incremental_refreshes_since_discovery"] == 2
     finally:
         pipeline.close()
+
+
+
+def test_taxonomy_cooperative_pause_yields_to_interactive_work(monkeypatch):
+    import osint_local.taxonomy as taxonomy
+
+    states = iter([True, True, False])
+    sleeps = []
+    progress = []
+
+    monkeypatch.setattr(
+        taxonomy.time,
+        "sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    taxonomy._wait_while_paused(
+        lambda: next(states),
+        lambda current, total, message: progress.append(
+            (current, total, message)
+        ),
+    )
+
+    assert len(sleeps) == 2
+    assert progress == [(0, 0, "Taxonomy paused for Chat/Ask…")]
+
+
+def test_taxonomy_ollama_label_batches_check_interactive_pause(monkeypatch):
+    import osint_local.taxonomy as taxonomy
+
+    waits = []
+    calls = []
+
+    monkeypatch.setattr(
+        taxonomy,
+        "_wait_while_paused",
+        lambda should_pause, progress=None: waits.append(True),
+    )
+    monkeypatch.setattr(
+        taxonomy,
+        "_ollama_chat",
+        lambda base_url, model, messages, config: calls.append(messages) or "[]",
+    )
+
+    candidates = [
+        {
+            "key": f"topic-{index}",
+            "keywords": ["drone"],
+            "representatives": [f"doc-{index}.pdf"],
+            "snippets": ["FPV drone operations"],
+            "document_count": 2,
+        }
+        for index in range(3)
+    ]
+
+    result = taxonomy._ollama_labels(
+        "topic",
+        candidates,
+        {"label_batch_size": 2, "max_llm_labels": 10},
+        {
+            "base_url": "http://127.0.0.1:11434",
+            "model": "qwen3:1.7b",
+            "keep_alive": 0,
+        },
+        should_pause=lambda: False,
+    )
+
+    assert result == {}
+    assert len(waits) == 2
+    assert len(calls) == 2
