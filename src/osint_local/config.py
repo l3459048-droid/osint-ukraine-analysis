@@ -85,6 +85,8 @@ DEFAULT_CONFIG = {
         "languages": "eng+rus+ukr",
         "min_text_chars_per_page": 80,
         "dpi": 220,
+        "quality_threshold": 0.72,
+        "ocr_improvement_margin": 0.08,
     },
     "classification": {"min_score": 1, "domains": DEFAULT_DOMAINS},
     "search": {
