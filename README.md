@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.18
+# OSINT Ukraine Analysis — local-first v0.9.19
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.18
+## Что делает v0.9.19
 
 ```text
 папка документов
@@ -98,6 +98,33 @@ osint-local translate <SHA256> --from auto
 ```
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
+
+## Adaptive Corpus Taxonomy v0.9.19
+
+Для больших библиотек добавлен отдельный analytical layer **Corpus**. Он не запускает повторный OCR, PDF extraction или перевод: taxonomy строится поверх уже готового semantic index.
+
+После semantic indexing система агрегирует chunk embeddings в document-level vectors, обнаруживает устойчивые semantic clusters и создаёт два уровня:
+
+- **Categories** — более широкие области корпуса;
+- **Topics** — более конкретные обнаруженные темы.
+
+Названия и короткие описания новых кластеров генерируются локальным Qwen через Ollama, если он доступен. Если Ollama недоступен или не вернул валидный JSON, система автоматически использует детерминированные keyword labels, поэтому rebuild не зависит от LLM.
+
+Документ может принадлежать сразу нескольким topics/categories. После открытия тем кластеризация используется только для discovery, затем выполняется multi-label assignment по cosine similarity. Порог и максимальное количество тем на документ настраиваются через `taxonomy.topic_assignment_similarity` и `taxonomy.max_topics_per_document`.
+
+На странице **Corpus** показываются adaptive categories, discovered topics, coverage и документы выбранной темы с semantic match score. На странице каждого документа появился блок **Adaptive taxonomy**, а Ask получил фильтры **Adaptive category** и **Topic**.
+
+Taxonomy автоматически перестраивается после обновления semantic index, только если corpus fingerprint изменился. Добавление/изменение документов с тем же количеством chunks тоже обнаруживается через embedding signature. Существующие названия сохраняются для семантически близких кластеров, чтобы категории не переименовывались при каждом небольшом изменении корпуса; Qwen именует только реально новые clusters.
+
+Старые rule-based classifications не удалены и остаются совместимым fallback-слоем. До первого adaptive rebuild главная страница показывает их; после построения taxonomy главная страница предпочитает новые adaptive categories.
+
+Ручной rebuild доступен через **Corpus → Rebuild taxonomy** или CLI:
+
+```powershell
+osint-local taxonomy
+```
+
+Все новые taxonomy tables живут отдельно от ingestion tables. Новый rebuild записывается транзакционно: если clustering/naming завершились ошибкой, предыдущая рабочая taxonomy остаётся доступной.
 
 ## Layout-preserving translated PDF v0.9.18
 
