@@ -687,6 +687,9 @@ class FastTranslator:
                     best_output = fallback_output
                     best_score = fallback_score
                     self.quality_fallbacks += 1
+                    record_selected = getattr(fallback_translator, "record_selected", None)
+                    if callable(record_selected):
+                        record_selected()
 
             if best_score >= self.quality_fallback_score:
                 self.quality_warnings += 1
