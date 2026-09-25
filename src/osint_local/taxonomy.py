@@ -138,12 +138,17 @@ def build_adaptive_taxonomy(
         if progress:
             progress(2, 6, "Naming discovered topics…")
         previous_topics = db.list_taxonomy_topics(limit=5000)
+        topic_overrides = db.list_taxonomy_label_overrides(
+            kind="topic",
+            limit=5000,
+        )
         topic_records = _materialize_topics(
             topic_clusters,
             documents,
             taxonomy_config,
             qa_config,
             previous=previous_topics,
+            overrides=topic_overrides,
             labeler=labeler,
             should_pause=should_pause,
             progress=progress,
@@ -173,12 +178,17 @@ def build_adaptive_taxonomy(
             weighted=True,
         )
         previous_categories = db.list_taxonomy_categories(limit=1000)
+        category_overrides = db.list_taxonomy_label_overrides(
+            kind="category",
+            limit=1000,
+        )
         category_records = _materialize_categories(
             raw_categories,
             topic_records,
             taxonomy_config,
             qa_config,
             previous=previous_categories,
+            overrides=category_overrides,
             labeler=labeler,
             should_pause=should_pause,
             progress=progress,
@@ -764,6 +774,7 @@ def _materialize_topics(
     qa_config: dict,
     *,
     previous=(),
+    overrides=(),
     labeler=None,
     should_pause: Callable[[], bool] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
@@ -801,6 +812,13 @@ def _materialize_topics(
             }
         )
 
+    _apply_manual_overrides(
+        candidates,
+        overrides,
+        threshold=float(
+            taxonomy_config.get("topic_manual_override_similarity", 0.90)
+        ),
+    )
     _reuse_previous_labels(
         candidates,
         previous,
@@ -828,6 +846,7 @@ def _materialize_categories(
     qa_config: dict,
     *,
     previous=(),
+    overrides=(),
     labeler=None,
     should_pause: Callable[[], bool] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
@@ -863,6 +882,13 @@ def _materialize_categories(
             }
         )
 
+    _apply_manual_overrides(
+        candidates,
+        overrides,
+        threshold=float(
+            taxonomy_config.get("category_manual_override_similarity", 0.86)
+        ),
+    )
     _reuse_previous_labels(
         candidates,
         previous,
@@ -997,6 +1023,59 @@ def _parse_json_array(value: str) -> list[dict[str, Any]]:
     except json.JSONDecodeError:
         return []
     return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
+def _apply_manual_overrides(
+    candidates: list[dict[str, Any]],
+    overrides,
+    *,
+    threshold: float,
+) -> None:
+    override_items = []
+    for row in overrides or []:
+        blob = row["centroid"]
+        if not blob:
+            continue
+        vector = _blob_to_vector(blob)
+        if not vector:
+            continue
+        override_items.append(
+            {
+                "name": str(row["name"] or ""),
+                "description": str(row["description"] or ""),
+                "vector": vector,
+                "source_key": str(row["source_key"] or ""),
+            }
+        )
+
+    used: set[int] = set()
+    for candidate in sorted(
+        candidates,
+        key=lambda item: int(item.get("document_count") or 0),
+        reverse=True,
+    ):
+        best_index = -1
+        best_score = float(threshold)
+        for index, override in enumerate(override_items):
+            if index in used:
+                continue
+            score = _dot(candidate["vector"], override["vector"])
+            if score >= best_score:
+                best_score = score
+                best_index = index
+        if best_index < 0:
+            continue
+
+        override = override_items[best_index]
+        if override["name"]:
+            candidate["name"] = override["name"]
+        if override["description"]:
+            candidate["description"] = override["description"]
+        candidate["label_locked"] = True
+        candidate["label_source"] = "manual"
+        candidate["manual_override_source_key"] = override["source_key"]
+        candidate["manual_override_score"] = round(best_score, 4)
+        used.add(best_index)
 
 
 def _reuse_previous_labels(
