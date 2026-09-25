@@ -730,6 +730,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._start_action("index")
             elif path == "/actions/taxonomy":
                 self._start_action("taxonomy")
+            elif path == "/actions/taxonomy-label":
+                self._taxonomy_label_action()
             elif path == "/actions/open-folder":
                 self._open_folder_action()
             elif path == "/actions/open-translations":
@@ -1228,6 +1230,53 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         self._action_response({"action": action}, status=HTTPStatus.ACCEPTED)
+
+    def _taxonomy_label_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "Invalid action token. Refresh the page and try again.",
+            )
+            return
+
+        kind = str(data.get("kind") or "").strip().casefold()
+        source_key = str(data.get("key") or "").strip()
+        if kind not in {"category", "topic"} or not source_key:
+            self._error(HTTPStatus.BAD_REQUEST, "Invalid taxonomy label target")
+            return
+
+        if str(data.get("reset") or "").strip() == "1":
+            self.db.delete_taxonomy_label_override(
+                kind=kind,
+                source_key=source_key,
+            )
+        else:
+            name = re.sub(r"\s+", " ", str(data.get("name") or "")).strip()
+            description = re.sub(
+                r"\s+",
+                " ",
+                str(data.get("description") or ""),
+            ).strip()
+            if not name:
+                self._error(HTTPStatus.BAD_REQUEST, "Taxonomy label name is empty")
+                return
+            self.db.save_taxonomy_label_override(
+                kind=kind,
+                source_key=source_key,
+                name=name[:80],
+                description=description[:280],
+                updated_at=datetime.now().astimezone().isoformat(),
+            )
+
+        target = (
+            f"/taxonomy?topic={quote(source_key, safe='')}"
+            if kind == "topic"
+            else f"/taxonomy?category={quote(source_key, safe='')}"
+        )
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", target)
+        self.end_headers()
 
     def _start_ask_action(self) -> None:
         data = self._form_data()
