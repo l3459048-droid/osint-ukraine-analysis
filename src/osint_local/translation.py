@@ -16,6 +16,7 @@ from .fast_translation import (
     load_fast_benchmark,
     prepare_fast_model,
     translate_sections_fast,
+    _paragraphs,
     _translation_quality_score,
 )
 from .translation_literals import translate_preserving_literals
@@ -349,12 +350,9 @@ def translate_document(
                 if progress:
                     progress(0, len(sections), f"Using Quality Translation · M2M100 418M INT8 · {src}→{dst}")
                 quality_engine = QualityTranslator(settings, src, dst)
-                translated = _translate_sections_legacy(
+                translated = _translate_sections_quality(
                     sections,
-                    src,
-                    dst,
-                    lambda value, _a, _b: quality_engine.translate_text(value),
-                    int(settings.translation.get("quality_max_chars_per_request", 2400)),
+                    quality_engine,
                     progress=progress,
                     should_pause=should_pause,
                 )
@@ -462,6 +460,33 @@ def _get_argos_translator(
     from argostranslate import translate as argos_translate
 
     return lambda value, a, b: argos_translate.translate(value, a, b)
+
+
+def _translate_sections_quality(
+    sections: list[tuple[int | None, str]],
+    engine: QualityTranslator,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+    should_pause: Callable[[], bool] | None = None,
+) -> list[tuple[int | None, str]]:
+    """Translate page-aware structural units without arbitrary character cuts."""
+    translated: list[tuple[int | None, str]] = []
+    total = len(sections)
+    if progress:
+        progress(0, total, "Preparing Quality Translation…")
+
+    for index, (page, text) in enumerate(sections, 1):
+        _wait_while_paused(should_pause, progress, index - 1, total)
+        units = _paragraphs(text)
+        outputs = engine.translate_texts(units) if units else []
+        translated_text = "\n\n".join(
+            output.strip() for output in outputs if output.strip()
+        ).strip()
+        translated.append((page, translated_text))
+        if progress:
+            label = f"Page {page}" if page is not None else "Document"
+            progress(index, total, f"Quality Translation · {label}")
+    return translated
 
 
 def _translate_sections_legacy(
