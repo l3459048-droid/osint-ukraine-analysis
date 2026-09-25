@@ -267,10 +267,10 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 <div class="ask-filter-note">After a pair is prepared, automatic translation prefers Fast Translation. Chat and Ask pause translation at safe batch boundaries.</div>
 </section>
 <section class="panel fast-translation-panel">
-<div class="panel-head"><div><h2>Quality Translation</h2><span class="panel-subtle">M2M100 418M · CTranslate2 INT8 · only for suspicious segments</span></div></div>
+<div class="panel-head"><div><h2>Quality Translation</h2><span class="panel-subtle">M2M100 418M · CTranslate2 INT8 · manual Quality or Auto fallback</span></div></div>
 <div class="fast-status" data-quality-status>{_e(quality_message if quality_setup.get("status") in {"running", "failed"} else "")}</div>
 <div class="fast-pair"><div><strong>English / Ukrainian → Russian</strong><small>{_e(quality_detail)}</small></div>{quality_button}</div>
-<div class="ask-filter-note">Auto mode keeps OPUS as the fast path. The Quality model is loaded lazily only after the quality gate rejects a segment. Protected dates, numbers, URLs and codes are restored exactly before scoring.</div>
+<div class="ask-filter-note">Manual Quality translates the full document with M2M100. Auto keeps OPUS as the fast path and loads Quality only after the quality gate rejects a segment. Protected dates, numbers, URLs and neutral codes are restored exactly before scoring.</div>
 </section>"""
 
 def _translation_panel(
