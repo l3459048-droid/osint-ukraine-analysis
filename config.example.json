@@ -115,7 +115,13 @@
     "quality_retry_score": 2,
     "quality_fallback_score": 4,
     "quality_fallback_enabled": true,
-    "quality_fallback_auto_install": false
+    "quality_fallback_auto_install": false,
+    "quality_engine_enabled": true,
+    "quality_compute_type": "int8",
+    "quality_batch_tokens": 1024,
+    "quality_max_input_tokens": 480,
+    "quality_segment_tokens": 240,
+    "quality_max_chars_per_request": 2400
   },
   "background": {
     "enabled": true,
