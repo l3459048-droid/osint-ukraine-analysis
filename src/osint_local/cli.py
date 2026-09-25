@@ -52,6 +52,12 @@ def main() -> int:
     translate_cmd = sub.add_parser("translate", help="Translate one English/Ukrainian document to Russian offline")
     translate_cmd.add_argument("sha256")
     translate_cmd.add_argument("--from", dest="source_lang", choices=["auto", "en", "uk"], default="auto")
+    translate_cmd.add_argument(
+        "--engine",
+        choices=["auto", "quality", "fast", "argos"],
+        default="auto",
+        help="Translation engine; Quality requires a prepared M2M100 model",
+    )
 
     ask_cmd = sub.add_parser("ask", help="Ask a local Ollama model about all indexed documents")
     ask_cmd.add_argument("question")
@@ -139,7 +145,9 @@ def main() -> int:
             try:
                 result = translate_document(
                     settings, pipeline.db, args.sha256,
-                    source_lang=args.source_lang, target_lang="ru",
+                    source_lang=args.source_lang,
+                    target_lang="ru",
+                    engine=args.engine,
                 )
             except RuntimeError as exc:
                 print(str(exc))
