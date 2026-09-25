@@ -46,7 +46,14 @@ QUALITY_BENCHMARK_CASES = (
 def quality_translation_available() -> bool:
     return all(
         importlib.util.find_spec(name) is not None
-        for name in ("ctranslate2", "sentencepiece", "transformers", "huggingface_hub")
+        for name in (
+            "ctranslate2",
+            "sentencepiece",
+            "transformers",
+            "huggingface_hub",
+            "torch",
+            "accelerate",
+        )
     )
 
 
