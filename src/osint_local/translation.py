@@ -121,6 +121,8 @@ def translate_document(
                     run_benchmark=True,
                 )
             if fast_model_ready(settings, src, dst):
+                if progress:
+                    progress(0, len(sections), f"Using Fast Translation · CTranslate2 INT8 · {src}→{dst}")
                 translated, fast_stats = translate_sections_fast(
                     settings,
                     sha256,
@@ -153,6 +155,8 @@ def translate_document(
             )
 
         if translated is None:
+            if progress:
+                progress(0, len(sections), f"Using Argos fallback · {src}→{dst}")
             argos_translator = _get_argos_translator(
                 src,
                 dst,
