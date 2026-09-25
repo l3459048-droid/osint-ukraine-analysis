@@ -70,6 +70,77 @@ CREATE TABLE IF NOT EXISTS translations (
 );
 CREATE INDEX IF NOT EXISTS idx_translations_document ON translations(document_sha256);
 
+CREATE TABLE IF NOT EXISTS taxonomy_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    model TEXT NOT NULL,
+    document_count INTEGER NOT NULL DEFAULT 0,
+    embedding_count INTEGER NOT NULL DEFAULT 0,
+    topic_count INTEGER NOT NULL DEFAULT 0,
+    category_count INTEGER NOT NULL DEFAULT 0,
+    details_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_runs_status ON taxonomy_runs(status, id);
+
+CREATE TABLE IF NOT EXISTS taxonomy_categories (
+    category_key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    keywords_json TEXT NOT NULL DEFAULT '[]',
+    centroid BLOB,
+    dimension INTEGER NOT NULL DEFAULT 0,
+    document_count INTEGER NOT NULL DEFAULT 0,
+    topic_count INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'discovered',
+    updated_at TEXT NOT NULL,
+    run_id INTEGER,
+    FOREIGN KEY(run_id) REFERENCES taxonomy_runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_categories_count
+    ON taxonomy_categories(document_count DESC, name);
+
+CREATE TABLE IF NOT EXISTS taxonomy_topics (
+    topic_key TEXT PRIMARY KEY,
+    category_key TEXT,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    keywords_json TEXT NOT NULL DEFAULT '[]',
+    centroid BLOB,
+    dimension INTEGER NOT NULL DEFAULT 0,
+    document_count INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'discovered',
+    updated_at TEXT NOT NULL,
+    run_id INTEGER,
+    FOREIGN KEY(category_key) REFERENCES taxonomy_categories(category_key) ON DELETE SET NULL,
+    FOREIGN KEY(run_id) REFERENCES taxonomy_runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_topics_category
+    ON taxonomy_topics(category_key, document_count DESC, name);
+
+CREATE TABLE IF NOT EXISTS document_taxonomy_topics (
+    document_sha256 TEXT NOT NULL,
+    topic_key TEXT NOT NULL,
+    score REAL NOT NULL,
+    PRIMARY KEY(document_sha256, topic_key),
+    FOREIGN KEY(document_sha256) REFERENCES documents(sha256) ON DELETE CASCADE,
+    FOREIGN KEY(topic_key) REFERENCES taxonomy_topics(topic_key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_taxonomy_topics_topic
+    ON document_taxonomy_topics(topic_key, score DESC);
+
+CREATE TABLE IF NOT EXISTS document_taxonomy_categories (
+    document_sha256 TEXT NOT NULL,
+    category_key TEXT NOT NULL,
+    score REAL NOT NULL,
+    PRIMARY KEY(document_sha256, category_key),
+    FOREIGN KEY(document_sha256) REFERENCES documents(sha256) ON DELETE CASCADE,
+    FOREIGN KEY(category_key) REFERENCES taxonomy_categories(category_key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_taxonomy_categories_category
+    ON document_taxonomy_categories(category_key, score DESC);
+
 """
 
 
@@ -424,6 +495,248 @@ class Database:
             return "", []
         return " AND " + " AND ".join(conditions), params
 
+
+    def begin_taxonomy_run(
+        self,
+        *,
+        started_at: str,
+        model: str,
+        document_count: int,
+        embedding_count: int,
+    ) -> int:
+        with self._lock:
+            cursor = self.conn.execute(
+                """INSERT INTO taxonomy_runs
+                   (started_at, status, model, document_count, embedding_count)
+                   VALUES (?, 'running', ?, ?, ?)""",
+                (started_at, model, int(document_count), int(embedding_count)),
+            )
+            self.conn.commit()
+            return int(cursor.lastrowid)
+
+    def fail_taxonomy_run(self, run_id: int, *, finished_at: str, error: str) -> None:
+        import json
+
+        with self._lock:
+            self.conn.execute(
+                """UPDATE taxonomy_runs
+                   SET status='failed', finished_at=?, details_json=?
+                   WHERE id=?""",
+                (
+                    finished_at,
+                    json.dumps({"error": str(error)}, ensure_ascii=False),
+                    int(run_id),
+                ),
+            )
+            self.conn.commit()
+
+    def replace_taxonomy(
+        self,
+        *,
+        run_id: int,
+        finished_at: str,
+        categories: list[dict[str, Any]],
+        topics: list[dict[str, Any]],
+        category_assignments: list[tuple[str, str, float]],
+        topic_assignments: list[tuple[str, str, float]],
+        details_json: str,
+    ) -> None:
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute("DELETE FROM document_taxonomy_topics")
+                self.conn.execute("DELETE FROM document_taxonomy_categories")
+                self.conn.execute("DELETE FROM taxonomy_topics")
+                self.conn.execute("DELETE FROM taxonomy_categories")
+
+                self.conn.executemany(
+                    """INSERT INTO taxonomy_categories
+                       (category_key, name, description, keywords_json, centroid,
+                        dimension, document_count, topic_count, source, updated_at, run_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            item["key"],
+                            item["name"],
+                            item.get("description", ""),
+                            item.get("keywords_json", "[]"),
+                            item.get("centroid"),
+                            int(item.get("dimension") or 0),
+                            int(item.get("document_count") or 0),
+                            int(item.get("topic_count") or 0),
+                            item.get("source", "discovered"),
+                            finished_at,
+                            int(run_id),
+                        )
+                        for item in categories
+                    ],
+                )
+                self.conn.executemany(
+                    """INSERT INTO taxonomy_topics
+                       (topic_key, category_key, name, description, keywords_json,
+                        centroid, dimension, document_count, source, updated_at, run_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            item["key"],
+                            item.get("category_key"),
+                            item["name"],
+                            item.get("description", ""),
+                            item.get("keywords_json", "[]"),
+                            item.get("centroid"),
+                            int(item.get("dimension") or 0),
+                            int(item.get("document_count") or 0),
+                            item.get("source", "discovered"),
+                            finished_at,
+                            int(run_id),
+                        )
+                        for item in topics
+                    ],
+                )
+                self.conn.executemany(
+                    """INSERT INTO document_taxonomy_categories
+                       (document_sha256, category_key, score)
+                       VALUES (?, ?, ?)""",
+                    [
+                        (sha256, key, float(score))
+                        for sha256, key, score in category_assignments
+                    ],
+                )
+                self.conn.executemany(
+                    """INSERT INTO document_taxonomy_topics
+                       (document_sha256, topic_key, score)
+                       VALUES (?, ?, ?)""",
+                    [
+                        (sha256, key, float(score))
+                        for sha256, key, score in topic_assignments
+                    ],
+                )
+                self.conn.execute(
+                    """UPDATE taxonomy_runs
+                       SET status='done', finished_at=?, topic_count=?,
+                           category_count=?, details_json=?
+                       WHERE id=?""",
+                    (
+                        finished_at,
+                        len(topics),
+                        len(categories),
+                        details_json,
+                        int(run_id),
+                    ),
+                )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def latest_taxonomy_run(self):
+        with self._lock:
+            return self.conn.execute(
+                """SELECT * FROM taxonomy_runs
+                   WHERE status='done'
+                   ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+
+    def taxonomy_counts(self) -> dict[str, int]:
+        with self._lock:
+            categories = int(
+                self.conn.execute("SELECT COUNT(*) FROM taxonomy_categories").fetchone()[0]
+            )
+            topics = int(
+                self.conn.execute("SELECT COUNT(*) FROM taxonomy_topics").fetchone()[0]
+            )
+            assigned = int(
+                self.conn.execute(
+                    "SELECT COUNT(DISTINCT document_sha256) FROM document_taxonomy_topics"
+                ).fetchone()[0]
+            )
+        return {
+            "categories": categories,
+            "topics": topics,
+            "assigned_documents": assigned,
+        }
+
+    def list_taxonomy_categories(self, *, limit: int = 200) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                """SELECT * FROM taxonomy_categories
+                   ORDER BY document_count DESC, name
+                   LIMIT ?""",
+                (max(1, min(1000, int(limit))),),
+            ).fetchall()
+
+    def list_taxonomy_topics(
+        self,
+        *,
+        category_key: str | None = None,
+        limit: int = 500,
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            if category_key:
+                return self.conn.execute(
+                    """SELECT * FROM taxonomy_topics
+                       WHERE category_key=?
+                       ORDER BY document_count DESC, name
+                       LIMIT ?""",
+                    (category_key, max(1, min(5000, int(limit)))),
+                ).fetchall()
+            return self.conn.execute(
+                """SELECT * FROM taxonomy_topics
+                   ORDER BY document_count DESC, name
+                   LIMIT ?""",
+                (max(1, min(5000, int(limit))),),
+            ).fetchall()
+
+    def taxonomy_for_document(self, sha256: str) -> dict[str, list[sqlite3.Row]]:
+        with self._lock:
+            categories = self.conn.execute(
+                """SELECT c.*, dc.score
+                   FROM document_taxonomy_categories dc
+                   JOIN taxonomy_categories c ON c.category_key=dc.category_key
+                   WHERE dc.document_sha256=?
+                   ORDER BY dc.score DESC, c.name""",
+                (sha256,),
+            ).fetchall()
+            topics = self.conn.execute(
+                """SELECT t.*, dt.score
+                   FROM document_taxonomy_topics dt
+                   JOIN taxonomy_topics t ON t.topic_key=dt.topic_key
+                   WHERE dt.document_sha256=?
+                   ORDER BY dt.score DESC, t.name""",
+                (sha256,),
+            ).fetchall()
+        return {"categories": categories, "topics": topics}
+
+    def taxonomy_documents(
+        self,
+        *,
+        category_key: str | None = None,
+        topic_key: str | None = None,
+        limit: int = 200,
+    ) -> list[sqlite3.Row]:
+        limit = max(1, min(5000, int(limit)))
+        with self._lock:
+            if topic_key:
+                return self.conn.execute(
+                    """SELECT d.*, dt.score AS taxonomy_score
+                       FROM document_taxonomy_topics dt
+                       JOIN documents d ON d.sha256=dt.document_sha256
+                       WHERE dt.topic_key=? AND d.status='done'
+                       ORDER BY dt.score DESC, d.source_path
+                       LIMIT ?""",
+                    (topic_key, limit),
+                ).fetchall()
+            if category_key:
+                return self.conn.execute(
+                    """SELECT d.*, dc.score AS taxonomy_score
+                       FROM document_taxonomy_categories dc
+                       JOIN documents d ON d.sha256=dc.document_sha256
+                       WHERE dc.category_key=? AND d.status='done'
+                       ORDER BY dc.score DESC, d.source_path
+                       LIMIT ?""",
+                    (category_key, limit),
+                ).fetchall()
+            return []
 
     def recent_errors(self, *, limit: int = 10) -> list[dict[str, Any]]:
         with self._lock:
