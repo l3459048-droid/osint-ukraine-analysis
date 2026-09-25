@@ -195,6 +195,10 @@ class _QualityFallbackRouter:
             "quality_selected": self.quality_selected,
             "argos_candidate_calls": self.argos_candidate_calls,
             "argos_selected": self.argos_selected,
+            "selected_engines": {
+                "m2m100-418m-int8": self.quality_selected,
+                "argos-translate": self.argos_selected,
+            },
             "quality_literal_segment_fallbacks": (
                 int(getattr(self._quality, "literal_segment_fallbacks", 0))
                 if self._quality is not None
@@ -312,7 +316,12 @@ def translate_document(
                     "literal_segment_fallbacks": fast_stats.literal_segment_fallbacks,
                 }
                 if fallback_router is not None:
-                    engine_meta.update(fallback_router.metadata())
+                    router_meta = fallback_router.metadata()
+                    engine_meta.update(router_meta)
+                    if int(router_meta.get("quality_selected") or 0) > 0:
+                        engine_name = "hybrid-ct2-quality"
+                    elif int(router_meta.get("argos_selected") or 0) > 0:
+                        engine_name = "hybrid-ct2-argos"
             elif selected_engine == "fast":
                 raise RuntimeError(
                     f"Fast model {src}→{dst} is not prepared. Prepare it in System first."
