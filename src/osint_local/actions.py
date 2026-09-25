@@ -162,6 +162,7 @@ class ActionManager:
             target_lang=target_lang,
             progress=progress,
             should_pause=self.interactive_busy,
+            engine="auto",
         )
 
     def _run_maintenance(self) -> dict[str, Any]:
