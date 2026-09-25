@@ -617,7 +617,7 @@ def _taxonomy_panel(
         )
     topics_html = "".join(topic_rows) or '<span class="translation-empty">No discovered topics yet.</span>'
 
-    docs_html = _document_cards(documents, _TaxonomyDocumentAdapter()) if documents else (
+    docs_html = _taxonomy_document_cards(documents) if documents else (
         '<div class="empty">Select a category or topic to view matching documents.</div>'
     )
 
@@ -637,9 +637,17 @@ def _taxonomy_panel(
 <section class="panel"><div class="panel-head"><h2>Documents</h2><span class="panel-subtle">Selected adaptive category/topic</span></div>{docs_html}</section>"""
 
 
-class _TaxonomyDocumentAdapter:
-    def get_classifications(self, sha256):
-        return []
+def _taxonomy_document_cards(rows) -> str:
+    cards = []
+    for row in rows:
+        score = float(row["taxonomy_score"] or 0.0)
+        cards.append(
+            f'<a class="doc-card" href="/documents/{row["sha256"]}"><div>'
+            f'<strong>{_e(row["source_path"])}</strong>'
+            f'<span>semantic match {score:.3f} · {_e(row["extension"])} · {_e(row["processed_at"] or "")}</span>'
+            '</div><span class="arrow">→</span></a>'
+        )
+    return '<div class="doc-list">' + "".join(cards) + "</div>"
 
 
 def _document_cards(rows, db) -> str:
