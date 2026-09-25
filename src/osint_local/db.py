@@ -677,6 +677,76 @@ class Database:
                    ORDER BY id DESC LIMIT 1"""
             ).fetchone()
 
+    def refresh_taxonomy_assignments(
+        self,
+        *,
+        run_id: int,
+        refreshed_at: str,
+        document_count: int,
+        embedding_count: int,
+        category_assignments: list[tuple[str, str, float]],
+        topic_assignments: list[tuple[str, str, float]],
+        category_document_counts: dict[str, int],
+        topic_document_counts: dict[str, int],
+        details_json: str,
+    ) -> None:
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute("DELETE FROM document_taxonomy_topics")
+                self.conn.execute("DELETE FROM document_taxonomy_categories")
+                self.conn.executemany(
+                    """INSERT INTO document_taxonomy_categories
+                       (document_sha256, category_key, score)
+                       VALUES (?, ?, ?)""",
+                    [
+                        (sha256, key, float(score))
+                        for sha256, key, score in category_assignments
+                    ],
+                )
+                self.conn.executemany(
+                    """INSERT INTO document_taxonomy_topics
+                       (document_sha256, topic_key, score)
+                       VALUES (?, ?, ?)""",
+                    [
+                        (sha256, key, float(score))
+                        for sha256, key, score in topic_assignments
+                    ],
+                )
+                self.conn.executemany(
+                    """UPDATE taxonomy_categories
+                       SET document_count=?, updated_at=?
+                       WHERE category_key=?""",
+                    [
+                        (int(count), refreshed_at, key)
+                        for key, count in category_document_counts.items()
+                    ],
+                )
+                self.conn.executemany(
+                    """UPDATE taxonomy_topics
+                       SET document_count=?, updated_at=?
+                       WHERE topic_key=?""",
+                    [
+                        (int(count), refreshed_at, key)
+                        for key, count in topic_document_counts.items()
+                    ],
+                )
+                self.conn.execute(
+                    """UPDATE taxonomy_runs
+                       SET document_count=?, embedding_count=?, details_json=?
+                       WHERE id=? AND status='done'""",
+                    (
+                        int(document_count),
+                        int(embedding_count),
+                        details_json,
+                        int(run_id),
+                    ),
+                )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
     def taxonomy_counts(self) -> dict[str, int]:
         with self._lock:
             categories = int(
