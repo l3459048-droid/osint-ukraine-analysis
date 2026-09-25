@@ -18,12 +18,13 @@ FAST_MODELS = {
 
 FAST_CORE_FILES = ("model.bin", "config.json")
 FAST_TOKENIZER_FILES = ("source.spm", "target.spm")
-FAST_BEAM_SIZE = 2
-FAST_REPETITION_PENALTY = 1.1
-FAST_NO_REPEAT_NGRAM_SIZE = 3
+FAST_BEAM_SIZE = 6
+FAST_REPETITION_PENALTY = 1.0
+FAST_NO_REPEAT_NGRAM_SIZE = 0
 FAST_SOURCE_EOS_TOKEN = "</s>"
-FAST_RETRY_BEAM_SIZE = 4
-FAST_RETRY_REPETITION_PENALTY = 1.15
+FAST_RETRY_BEAM_SIZE = 8
+FAST_RETRY_REPETITION_PENALTY = 1.12
+FAST_RETRY_NO_REPEAT_NGRAM_SIZE = 3
 
 
 @dataclass(frozen=True)
@@ -292,6 +293,54 @@ def _semantic_units(text: str) -> list[str]:
     return units
 
 
+TECHNICAL_FILL_RE = re.compile(r"(?:_{2,}|[.·]{5,})")
+URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+OUTPUT_URL_RE = re.compile(r"https?:/{1,2}[^\s<>()]+", re.IGNORECASE)
+
+
+def _clean_translation_unit(text: str) -> str:
+    value = TECHNICAL_FILL_RE.sub(" ", str(text or ""))
+    value = re.sub(r"«\s*»", " ", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    return value.strip()
+
+
+def _is_structured_unit(raw_text: str, tokens: Sequence[str]) -> bool:
+    value = str(raw_text or "")
+    return (
+        bool(TECHNICAL_FILL_RE.search(value))
+        or "№" in value
+        or bool(URL_RE.search(value))
+        or bool(re.match(r"^\s*\d{1,3}[.)]\s+", value))
+        or len(tokens) <= 36
+    )
+
+
+def _restore_source_urls(source: str, translated: str) -> str:
+    source_urls = URL_RE.findall(str(source or ""))
+    if not source_urls:
+        return translated
+
+    matches = list(OUTPUT_URL_RE.finditer(translated))
+    if not matches:
+        suffix = " ".join(source_urls)
+        return f"{translated.rstrip()} {suffix}".strip()
+
+    pieces: list[str] = []
+    last = 0
+    for index, match in enumerate(matches):
+        pieces.append(translated[last:match.start()])
+        replacement = source_urls[min(index, len(source_urls) - 1)]
+        pieces.append(replacement)
+        last = match.end()
+    pieces.append(translated[last:])
+    result = "".join(pieces)
+
+    if len(matches) < len(source_urls):
+        result = f"{result.rstrip()} {' '.join(source_urls[len(matches):])}".strip()
+    return result
+
+
 def _semantic_token_windows(
     text: str,
     source_sp,
@@ -309,13 +358,21 @@ def _semantic_token_windows(
             windows.append(current + [FAST_SOURCE_EOS_TOKEN])
             current = []
 
-    for unit in _semantic_units(text):
+    for raw_unit in _semantic_units(text):
+        unit = _clean_translation_unit(raw_unit)
+        if not unit:
+            continue
         tokens = list(source_sp.encode(unit, out_type=str))
         if not tokens:
             continue
+        structured = _is_structured_unit(raw_unit, tokens)
         if len(tokens) > content_limit:
             flush()
             windows.extend(_source_token_windows(tokens, max_input_tokens))
+            continue
+        if structured:
+            flush()
+            windows.append(tokens + [FAST_SOURCE_EOS_TOKEN])
             continue
         if current and len(current) + len(tokens) > soft_limit:
             flush()
@@ -362,7 +419,9 @@ def _decode_options(tokenized: Sequence[Sequence[str]], *, retry: bool = False) 
         "repetition_penalty": (
             FAST_RETRY_REPETITION_PENALTY if retry else FAST_REPETITION_PENALTY
         ),
-        "no_repeat_ngram_size": FAST_NO_REPEAT_NGRAM_SIZE,
+        "no_repeat_ngram_size": (
+            FAST_RETRY_NO_REPEAT_NGRAM_SIZE if retry else FAST_NO_REPEAT_NGRAM_SIZE
+        ),
         "max_decoding_length": max_decoding_length,
     }
 
@@ -396,7 +455,7 @@ class FastTranslator:
             48,
             min(
                 self.max_input_tokens - 1,
-                int(settings.translation.get("fast_segment_tokens", 160) or 160),
+                int(settings.translation.get("fast_segment_tokens", 120) or 120),
             ),
         )
         self.translator = ctranslate2.Translator(
@@ -478,7 +537,11 @@ class FastTranslator:
             ).strip()
             if retry_output and _degeneracy_score(str(source), retry_output) < original_score:
                 translated[index] = retry_output
-        return translated
+
+        return [
+            _restore_source_urls(str(source), output)
+            for source, output in zip(texts, translated)
+        ]
 
 
 def translate_sections_fast(

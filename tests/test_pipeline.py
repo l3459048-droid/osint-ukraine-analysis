@@ -2003,9 +2003,13 @@ def test_fast_translation_quality_guards_scale_decoding_to_real_input():
     short = fast._decode_options([["▁короткий"] * 8])
     long = fast._decode_options([["▁довгий"] * 220])
 
-    assert short["beam_size"] == 2
-    assert short["repetition_penalty"] > 1
-    assert short["no_repeat_ngram_size"] >= 3
+    assert short["beam_size"] == 6
+    assert short["repetition_penalty"] == 1.0
+    assert short["no_repeat_ngram_size"] == 0
+    retry = fast._decode_options([["▁короткий"] * 8], retry=True)
+    assert retry["beam_size"] == 8
+    assert retry["repetition_penalty"] > 1
+    assert retry["no_repeat_ngram_size"] == 3
     assert short["max_decoding_length"] == 48
     assert long["max_decoding_length"] < 440
     assert long["max_decoding_length"] <= 384
@@ -2056,3 +2060,42 @@ def test_fast_translation_detects_runaway_or_token_fragment_output():
     assert fast._degeneracy_score("короткий текст", repeated) > 0
     assert fast._degeneracy_score("короткий текст", fragments) > 0
     assert fast._degeneracy_score("короткий текст", stretched) > 0
+
+
+
+def test_fast_translation_cleans_form_fillers_and_isolates_short_fields():
+    import osint_local.fast_translation as fast
+
+    class FakeSentencePiece:
+        def encode(self, text, out_type=str):
+            return text.split()
+
+    source = (
+        "Ректор __________________ Ярослав КІЧУК\n"
+        "протокол № __ від «__» ______ 2026 р.\n"
+        "Ізмаїл – 2026 р."
+    )
+    assert fast._clean_translation_unit(
+        "Ректор __________________ Ярослав КІЧУК"
+    ) == "Ректор Ярослав КІЧУК"
+
+    windows = fast._semantic_token_windows(
+        source,
+        FakeSentencePiece(),
+        max_input_tokens=32,
+        segment_tokens=24,
+    )
+    assert len(windows) == 3
+    assert all(window[-1] == "</s>" for window in windows)
+    assert all("_" not in token for window in windows for token in window)
+
+
+def test_fast_translation_restores_exact_source_urls():
+    import osint_local.fast_translation as fast
+
+    source = "Інтернет-адреса http://idgu.edu.ua/ects"
+    translated = "Интернет-адрес http:/idgu.eua/ects"
+
+    restored = fast._restore_source_urls(source, translated)
+    assert "http://idgu.edu.ua/ects" in restored
+    assert "idgu.eua" not in restored

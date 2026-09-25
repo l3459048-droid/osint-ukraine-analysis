@@ -109,7 +109,7 @@
     "fast_inter_threads": 0,
     "fast_intra_threads": 0,
     "benchmark_chars_per_page": 1800,
-    "fast_segment_tokens": 160
+    "fast_segment_tokens": 120
   },
   "background": {
     "enabled": true,
