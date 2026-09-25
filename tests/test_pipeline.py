@@ -4376,3 +4376,47 @@ def test_web_can_pin_taxonomy_label(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_manual_taxonomy_override_has_priority_over_reused_label():
+    import osint_local.taxonomy as taxonomy
+    from array import array
+
+    candidate = {
+        "key": "topic-new",
+        "name": "Fallback",
+        "description": "Fallback description",
+        "vector": [1.0, 0.0],
+        "document_count": 10,
+    }
+    overrides = [
+        {
+            "centroid": array("f", [1.0, 0.0]).tobytes(),
+            "name": "Pinned Human Name",
+            "description": "Pinned description",
+            "source_key": "topic-old",
+        }
+    ]
+    previous = [
+        {
+            "centroid": array("f", [1.0, 0.0]).tobytes(),
+            "name": "Old Automatic Name",
+            "description": "Old automatic description",
+        }
+    ]
+
+    taxonomy._apply_manual_overrides(
+        [candidate],
+        overrides,
+        threshold=0.90,
+    )
+    taxonomy._reuse_previous_labels(
+        [candidate],
+        previous,
+        threshold=0.80,
+    )
+
+    assert candidate["name"] == "Pinned Human Name"
+    assert candidate["description"] == "Pinned description"
+    assert candidate["label_source"] == "manual"
