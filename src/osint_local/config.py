@@ -120,6 +120,12 @@ DEFAULT_CONFIG = {
         "fast_segment_tokens": 120,
         "quality_retry_score": 2,
         "quality_fallback_score": 4,
+        "quality_engine_enabled": True,
+        "quality_compute_type": "int8",
+        "quality_batch_tokens": 1024,
+        "quality_max_input_tokens": 480,
+        "quality_segment_tokens": 240,
+        "quality_max_chars_per_request": 2400,
         "quality_fallback_enabled": True,
         "quality_fallback_auto_install": False,
         "fast_inter_threads": 0,
@@ -182,6 +188,10 @@ class Settings:
     @property
     def metadata_dir(self) -> Path:
         return self.workspace_dir / "metadata"
+
+    @property
+    def layout_dir(self) -> Path:
+        return self.workspace_dir / "layout"
 
     @property
     def logs_dir(self) -> Path:
