@@ -4228,6 +4228,17 @@ def test_taxonomy_label_override_applies_immediately_and_survives_rebuild(tmp_pa
         rebuilt = pipeline.db.list_taxonomy_topics(limit=10)[0]
         assert rebuilt["name"] == "FPV Operations"
         assert rebuilt["description"] == "Pinned human label"
+        assert rebuilt["source"] == "manual"
+
+        overrides = pipeline.db.list_taxonomy_label_overrides(kind="topic")
+        assert len(overrides) == 1
+        assert overrides[0]["source_key"] == rebuilt["topic_key"]
+
+        pipeline.db.delete_taxonomy_label_override(
+            kind="topic",
+            source_key=rebuilt["topic_key"],
+        )
+        assert pipeline.db.list_taxonomy_label_overrides(kind="topic") == []
     finally:
         pipeline.close()
 
