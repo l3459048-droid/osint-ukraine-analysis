@@ -2470,6 +2470,8 @@ def test_quality_translation_uses_m2m100_language_prefixes():
 
     assert output == "Привет мир"
     assert seen["source"][0][0] == "__uk__"
+    assert seen["source"][0][-1] == "</s>"
+    assert all(len(window) <= engine.max_input_tokens for window in seen["source"])
     assert seen["target_prefix"] == [["__ru__"]]
     assert seen["beam_size"] == 5
 
