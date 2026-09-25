@@ -257,6 +257,7 @@ def translate_document(
     custom_translator = translator is not None
     engine_name = "custom"
     engine_meta: dict = {}
+    used_fast_translation = False
 
     if custom_translator:
         translated = _translate_sections_legacy(
@@ -298,6 +299,7 @@ def translate_document(
                     if fallback_router.available:
                         quality_fallback = fallback_router
 
+                used_fast_translation = True
                 translated, fast_stats = translate_sections_fast(
                     settings,
                     sha256,
@@ -416,7 +418,7 @@ def translate_document(
         created_at=created_at,
         engine=engine_name,
     )
-    if engine_name.startswith("ctranslate2"):
+    if used_fast_translation:
         clear_fast_checkpoint(settings, sha256, dst)
     return metadata
 
