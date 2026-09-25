@@ -299,7 +299,7 @@ def _semantic_token_windows(
     segment_tokens: int,
 ) -> list[list[str]]:
     content_limit = max(1, int(max_input_tokens) - 1)
-    soft_limit = max(32, min(content_limit, int(segment_tokens)))
+    soft_limit = min(content_limit, max(32, int(segment_tokens)))
     windows: list[list[str]] = []
     current: list[str] = []
 
