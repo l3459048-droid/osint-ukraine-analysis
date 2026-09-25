@@ -3471,3 +3471,269 @@ def test_web_taxonomy_page_and_rebuild_action(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_incremental_taxonomy_assigns_matching_new_document_without_rebuild(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import (
+        build_adaptive_taxonomy,
+        refresh_adaptive_taxonomy,
+        taxonomy_is_stale,
+    )
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.taxonomy.update(
+        {
+            "min_documents": 4,
+            "min_topic_documents": 2,
+            "topic_similarity": 0.80,
+            "topic_merge_similarity": 0.95,
+            "topic_assignment_similarity": 0.65,
+            "category_similarity": 0.80,
+            "category_merge_similarity": 0.95,
+            "label_with_ollama": False,
+            "full_rebuild_min_growth": 10,
+            "full_rebuild_growth_ratio": 1.0,
+            "discovery_min_unassigned": 10,
+            "discovery_unassigned_ratio": 1.0,
+        }
+    )
+
+    base_documents = {
+        "drone-a.txt": ("FPV drone operations.", [1.0, 0.0, 0.0]),
+        "drone-b.txt": ("UAV reconnaissance.", [0.99, 0.01, 0.0]),
+        "tourism-a.txt": ("Tourism curriculum.", [0.0, 1.0, 0.0]),
+        "tourism-b.txt": ("Tourism accreditation.", [0.01, 0.99, 0.0]),
+    }
+
+    pipeline = LocalPipeline(settings)
+    try:
+        for name, (text_value, vector) in base_documents.items():
+            file_path = settings.input_dir / name
+            file_path.write_text(text_value, encoding="utf-8")
+            result = pipeline.process_file(file_path)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            normalized = _normalize_vector(vector)
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        len(normalized),
+                        _vector_to_blob(normalized),
+                    )
+                ]
+            )
+
+        built = build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+        assert built["topics"] == 2
+        assert taxonomy_is_stale(pipeline.db, settings.search) is False
+
+        new_path = settings.input_dir / "drone-c.txt"
+        new_path.write_text("FPV drone training.", encoding="utf-8")
+        new_result = pipeline.process_file(new_path)
+        new_chunk = pipeline.db.chunks_for_document(new_result.sha256, limit=1)[0]
+        normalized = _normalize_vector([0.97, 0.03, 0.0])
+        pipeline.db.save_embeddings(
+            [
+                (
+                    new_chunk["id"],
+                    settings.search["model"],
+                    len(normalized),
+                    _vector_to_blob(normalized),
+                )
+            ]
+        )
+
+        assert taxonomy_is_stale(pipeline.db, settings.search) is True
+        refreshed = refresh_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+        )
+
+        assert refreshed["mode"] == "incremental"
+        assert refreshed["needs_rebuild"] is False
+        assert refreshed["assigned_documents"] == 5
+        assert refreshed["unassigned_documents"] == 0
+        assert taxonomy_is_stale(pipeline.db, settings.search) is False
+
+        taxonomy = pipeline.db.taxonomy_for_document(new_result.sha256)
+        assert taxonomy["topics"]
+        assert taxonomy["categories"]
+
+        latest = pipeline.db.latest_taxonomy_run()
+        details = json.loads(latest["details_json"])
+        assert details["last_refresh_mode"] == "incremental"
+        assert details["discovery_document_count"] == 4
+        assert int(latest["document_count"]) == 5
+    finally:
+        pipeline.close()
+
+
+def test_incremental_taxonomy_requests_discovery_for_novel_documents(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import (
+        build_adaptive_taxonomy,
+        refresh_adaptive_taxonomy,
+        taxonomy_is_stale,
+    )
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.taxonomy.update(
+        {
+            "min_documents": 4,
+            "min_topic_documents": 2,
+            "topic_similarity": 0.80,
+            "topic_merge_similarity": 0.95,
+            "topic_assignment_similarity": 0.70,
+            "category_similarity": 0.80,
+            "category_merge_similarity": 0.95,
+            "label_with_ollama": False,
+            "full_rebuild_min_growth": 100,
+            "full_rebuild_growth_ratio": 10.0,
+            "discovery_min_unassigned": 2,
+            "discovery_unassigned_ratio": 0.0,
+        }
+    )
+
+    base_documents = {
+        "drone-a.txt": ("FPV drone operations.", [1.0, 0.0, 0.0]),
+        "drone-b.txt": ("UAV reconnaissance.", [0.99, 0.01, 0.0]),
+        "tourism-a.txt": ("Tourism curriculum.", [0.0, 1.0, 0.0]),
+        "tourism-b.txt": ("Tourism accreditation.", [0.01, 0.99, 0.0]),
+    }
+
+    pipeline = LocalPipeline(settings)
+    try:
+        for name, (text_value, vector) in base_documents.items():
+            file_path = settings.input_dir / name
+            file_path.write_text(text_value, encoding="utf-8")
+            result = pipeline.process_file(file_path)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            normalized = _normalize_vector(vector)
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        len(normalized),
+                        _vector_to_blob(normalized),
+                    )
+                ]
+            )
+
+        build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+
+        for index in range(2):
+            file_path = settings.input_dir / f"energy-{index}.txt"
+            file_path.write_text(
+                f"Energy infrastructure grid report {index}.",
+                encoding="utf-8",
+            )
+            result = pipeline.process_file(file_path)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            normalized = _normalize_vector([0.0, 0.0, 1.0])
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        len(normalized),
+                        _vector_to_blob(normalized),
+                    )
+                ]
+            )
+
+        refreshed = refresh_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+        )
+
+        assert refreshed["needs_rebuild"] is True
+        assert refreshed["reason"] == "novel_documents"
+        assert refreshed["unassigned_documents"] == 2
+        assert taxonomy_is_stale(pipeline.db, settings.search) is True
+    finally:
+        pipeline.close()
+
+
+def test_maintenance_uses_incremental_taxonomy_before_full_rebuild(tmp_path: Path, monkeypatch):
+    import osint_local.actions as actions
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import build_adaptive_taxonomy
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.background["auto_index"] = False
+    settings.translation["passive_enabled"] = False
+    settings.taxonomy["min_documents"] = 2
+    settings.taxonomy["label_with_ollama"] = False
+
+    pipeline = LocalPipeline(settings)
+    try:
+        for index in range(2):
+            file_path = settings.input_dir / f"base-{index}.txt"
+            file_path.write_text(f"FPV drone report {index}", encoding="utf-8")
+            result = pipeline.process_file(file_path)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            normalized = _normalize_vector([1.0, 0.0])
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        len(normalized),
+                        _vector_to_blob(normalized),
+                    )
+                ]
+            )
+
+        build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+
+        monkeypatch.setattr(actions, "taxonomy_is_stale", lambda db, cfg: True)
+        calls = []
+
+        def fake_refresh(db, search_config, taxonomy_config, progress=None):
+            calls.append("refresh")
+            return {
+                "mode": "incremental",
+                "needs_rebuild": False,
+                "topics": 1,
+                "categories": 1,
+                "assigned_documents": 2,
+            }
+
+        def fail_build(*args, **kwargs):
+            raise AssertionError("full discovery should not run")
+
+        monkeypatch.setattr(actions, "refresh_adaptive_taxonomy", fake_refresh)
+        monkeypatch.setattr(actions, "build_adaptive_taxonomy", fail_build)
+
+        manager = actions.ActionManager(pipeline)
+        result = manager._run_maintenance()
+
+        assert calls == ["refresh"]
+        assert result["taxonomy"]["mode"] == "incremental"
+        assert result["taxonomy"]["needs_rebuild"] is False
+    finally:
+        pipeline.close()
