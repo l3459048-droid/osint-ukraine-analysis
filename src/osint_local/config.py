@@ -132,6 +132,22 @@ DEFAULT_CONFIG = {
         "fast_intra_threads": 0,
         "benchmark_chars_per_page": 1800,
     },
+    "taxonomy": {
+        "enabled": True,
+        "auto_rebuild": True,
+        "min_documents": 8,
+        "min_topic_documents": 2,
+        "topic_similarity": 0.64,
+        "topic_merge_similarity": 0.82,
+        "category_similarity": 0.48,
+        "category_merge_similarity": 0.70,
+        "max_topics": 80,
+        "max_categories": 24,
+        "label_with_ollama": True,
+        "label_language": "en",
+        "label_batch_size": 8,
+        "max_llm_labels": 60,
+    },
     "background": {
         "enabled": True,
         "initial_delay_seconds": 3,
@@ -172,6 +188,7 @@ class Settings:
     classification: dict[str, Any]
     search: dict[str, Any]
     translation: dict[str, Any]
+    taxonomy: dict[str, Any]
     background: dict[str, Any]
     qa: dict[str, Any]
     web: dict[str, Any]
@@ -226,6 +243,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         classification=data["classification"],
         search=data["search"],
         translation=data["translation"],
+        taxonomy=data["taxonomy"],
         background=data["background"],
         qa=data["qa"],
         web=data["web"],
