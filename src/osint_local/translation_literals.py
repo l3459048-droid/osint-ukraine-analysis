@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
 
@@ -9,7 +10,7 @@ _LITERAL_RE = re.compile(
     r"https?://[^\s<>()]+"
     r"|\b[a-fA-F0-9]{32,64}\b"
     r"|\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"
-    r"|\b(?:QF-LLL|EHEA|ECTS|ЄКТС|ЕКТС|FQ|НРК|УД|J\d+)\b"
+    r"|\b(?:QF-LLL|EHEA|ECTS|ЕКТС|FQ|НРК|УД|J\d+)\b"
     r"|\b\d+(?:[.,:/-]\d+)+\b"
     r"|\b\d+(?:[.,]\d+)?\b",
     re.IGNORECASE | re.UNICODE,
@@ -80,10 +81,12 @@ def extract_protected_literals(text: str) -> tuple[str, ...]:
 
 def missing_protected_literals(source: str, translated: str) -> tuple[str, ...]:
     output = str(translated or "")
+    required = Counter(extract_protected_literals(source))
     missing: list[str] = []
-    for literal in extract_protected_literals(source):
-        if literal not in output:
-            missing.append(literal)
+    for literal, count in required.items():
+        present = output.count(literal)
+        if present < count:
+            missing.extend([literal] * (count - present))
     return tuple(missing)
 
 
