@@ -115,6 +115,7 @@ DEFAULT_CONFIG = {
         "fast_text_batch": 16,
         "fast_page_batch": 4,
         "fast_max_input_tokens": 220,
+        "fast_segment_tokens": 160,
         "fast_inter_threads": 0,
         "fast_intra_threads": 0,
         "benchmark_chars_per_page": 1800,

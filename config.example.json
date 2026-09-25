@@ -88,8 +88,8 @@
     "auto_embed": false,
     "hybrid_candidate_multiplier": 3,
     "hybrid_rrf_k": 60,
-    "hybrid_semantic_weight": 1.0,
-    "hybrid_lexical_weight": 1.0
+    "hybrid_semantic_weight": 1,
+    "hybrid_lexical_weight": 1
   },
   "translation": {
     "enabled": true,
@@ -108,7 +108,8 @@
     "fast_max_input_tokens": 220,
     "fast_inter_threads": 0,
     "fast_intra_threads": 0,
-    "benchmark_chars_per_page": 1800
+    "benchmark_chars_per_page": 1800,
+    "fast_segment_tokens": 160
   },
   "background": {
     "enabled": true,

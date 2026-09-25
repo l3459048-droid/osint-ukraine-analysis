@@ -2021,3 +2021,38 @@ def test_fast_translation_source_windows_append_marian_eos():
     assert windows == [["a", "b", "c", "</s>"], ["d", "e", "</s>"]]
     assert all(window[-1] == "</s>" for window in windows)
     assert all(len(window) <= 4 for window in windows)
+
+
+
+def test_fast_translation_semantic_segmentation_prefers_form_and_sentence_boundaries():
+    import osint_local.fast_translation as fast
+
+    class FakeSentencePiece:
+        def encode(self, text, out_type=str):
+            return text.split()
+
+    source = (
+        "ОПИС ОСВІТНЬОЇ ПРОГРАМИ    Тип освітньої програми: професійна програма. "
+        "1. Рада з якості освіти. 2. Вчена рада факультету."
+    )
+    units = fast._semantic_units(source)
+    windows = fast._semantic_token_windows(source, FakeSentencePiece(), 12, 8)
+
+    assert len(units) >= 4
+    assert all(window[-1] == "</s>" for window in windows)
+    assert all(len(window) <= 12 for window in windows)
+    assert len(windows) >= 2
+
+
+def test_fast_translation_detects_runaway_or_token_fragment_output():
+    import osint_local.fast_translation as fast
+
+    clean = "Міністерство освіти і науки України затвердило освітню програму."
+    repeated = "Ізмаїл г. г. г. г. г. г. г."
+    fragments = "текст url_ nor_ ya_ or_ name_ data_ field_ tail_"
+    stretched = "Дейеееееееее викладач кафедри."
+
+    assert fast._degeneracy_score(clean, clean) == 0
+    assert fast._degeneracy_score("короткий текст", repeated) > 0
+    assert fast._degeneracy_score("короткий текст", fragments) > 0
+    assert fast._degeneracy_score("короткий текст", stretched) > 0

@@ -21,6 +21,8 @@ FAST_BEAM_SIZE = 2
 FAST_REPETITION_PENALTY = 1.1
 FAST_NO_REPEAT_NGRAM_SIZE = 3
 FAST_SOURCE_EOS_TOKEN = "</s>"
+FAST_RETRY_BEAM_SIZE = 4
+FAST_RETRY_REPETITION_PENALTY = 1.15
 
 
 @dataclass(frozen=True)
@@ -271,12 +273,94 @@ def _source_token_windows(tokens: Sequence[str], max_input_tokens: int) -> list[
     ]
 
 
-def _decode_options(tokenized: Sequence[Sequence[str]]) -> dict:
+def _semantic_units(text: str) -> list[str]:
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    # PDF text extraction often flattens columns and form fields into very long
+    # lines separated by large whitespace gaps. Treat those gaps as boundaries
+    # before normalizing ordinary spaces.
+    value = re.sub(r"[ \t]{4,}", "\n", value)
+    value = re.sub(r"\s+(?=\d{1,3}[.)]\s+)", "\n", value)
+
+    units: list[str] = []
+    for block in re.split(r"\n+", value):
+        block = re.sub(r"[ \t]+", " ", block).strip()
+        if not block:
+            continue
+        parts = re.split(r"(?<=[.!?…;:])\s+(?=\S)", block)
+        units.extend(part.strip() for part in parts if part.strip())
+    return units
+
+
+def _semantic_token_windows(
+    text: str,
+    source_sp,
+    max_input_tokens: int,
+    segment_tokens: int,
+) -> list[list[str]]:
+    content_limit = max(1, int(max_input_tokens) - 1)
+    soft_limit = max(32, min(content_limit, int(segment_tokens)))
+    windows: list[list[str]] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            windows.append(current + [FAST_SOURCE_EOS_TOKEN])
+            current = []
+
+    for unit in _semantic_units(text):
+        tokens = list(source_sp.encode(unit, out_type=str))
+        if not tokens:
+            continue
+        if len(tokens) > content_limit:
+            flush()
+            windows.extend(_source_token_windows(tokens, max_input_tokens))
+            continue
+        if current and len(current) + len(tokens) > soft_limit:
+            flush()
+        current.extend(tokens)
+    flush()
+    return windows
+
+
+def _degeneracy_score(source: str, translated: str) -> int:
+    source = str(source or "")
+    translated = str(translated or "")
+    if not translated.strip():
+        return 10 if source.strip() else 0
+
+    score = 0
+    if len(translated) > max(240, int(len(source) * 2.4)):
+        score += 2
+    if re.search(r"(.)\\1{5,}", translated, flags=re.IGNORECASE):
+        score += 3
+
+    words = re.findall(r"[^\\W_]+", translated.casefold(), flags=re.UNICODE)
+    run = 1
+    max_run = 1
+    for previous, current in zip(words, words[1:]):
+        if current == previous:
+            run += 1
+            max_run = max(max_run, run)
+        else:
+            run = 1
+    if max_run >= 4:
+        score += 4
+
+    token_fragments = re.findall(r"(?<!\\w)[^\\s_]{1,16}_(?=\\s|$)", translated)
+    if len(token_fragments) >= 6:
+        score += 4
+    return score
+
+
+def _decode_options(tokenized: Sequence[Sequence[str]], *, retry: bool = False) -> dict:
     longest_source = max((len(tokens) for tokens in tokenized), default=0)
     max_decoding_length = max(48, min(384, int(longest_source * 1.8) + 24))
     return {
-        "beam_size": FAST_BEAM_SIZE,
-        "repetition_penalty": FAST_REPETITION_PENALTY,
+        "beam_size": FAST_RETRY_BEAM_SIZE if retry else FAST_BEAM_SIZE,
+        "repetition_penalty": (
+            FAST_RETRY_REPETITION_PENALTY if retry else FAST_REPETITION_PENALTY
+        ),
         "no_repeat_ngram_size": FAST_NO_REPEAT_NGRAM_SIZE,
         "max_decoding_length": max_decoding_length,
     }
@@ -307,6 +391,13 @@ class FastTranslator:
             profile = str(settings.performance.get("profile") or "economy").casefold()
             self.batch_tokens = 4096 if profile == "balanced" else 2048
         self.max_input_tokens = max(64, min(512, int(settings.translation.get("fast_max_input_tokens", 220))))
+        self.segment_tokens = max(
+            48,
+            min(
+                self.max_input_tokens - 1,
+                int(settings.translation.get("fast_segment_tokens", 160) or 160),
+            ),
+        )
         self.translator = ctranslate2.Translator(
             str(self.model_dir),
             device="cpu",
@@ -323,36 +414,70 @@ class FastTranslator:
             self.model_dir / "target.spm",
         )
 
-    def translate_texts(self, texts: Sequence[str]) -> list[str]:
-        tokenized: list[list[str]] = []
-        ownership: list[int] = []
-        for text_index, text in enumerate(texts):
-            tokens = list(self.source_sp.encode(str(text), out_type=str))
-            if not tokens:
-                tokenized.append([])
-                ownership.append(text_index)
-                continue
-            for window in _source_token_windows(tokens, self.max_input_tokens):
-                tokenized.append(window)
-                ownership.append(text_index)
-
+    def _translate_windows(self, tokenized: list[list[str]], *, retry: bool = False) -> list[str]:
         if not tokenized:
-            return ["" for _ in texts]
-
+            return []
         results = self.translator.translate_batch(
             tokenized,
             max_batch_size=self.batch_tokens,
             batch_type="tokens",
             return_scores=False,
             max_input_length=self.max_input_tokens,
-            **_decode_options(tokenized),
+            **_decode_options(tokenized, retry=retry),
         )
-
-        grouped: list[list[str]] = [[] for _ in texts]
-        for owner, result in zip(ownership, results):
+        decoded: list[str] = []
+        for result in results:
             pieces = result.hypotheses[0] if result.hypotheses else []
-            grouped[owner].append(self.target_sp.decode(pieces))
-        return [" ".join(part.strip() for part in group if part.strip()).strip() for group in grouped]
+            decoded.append(self.target_sp.decode(pieces).strip())
+        return decoded
+
+    def translate_texts(self, texts: Sequence[str]) -> list[str]:
+        tokenized: list[list[str]] = []
+        ownership: list[int] = []
+        for text_index, text in enumerate(texts):
+            windows = _semantic_token_windows(
+                str(text),
+                self.source_sp,
+                self.max_input_tokens,
+                self.segment_tokens,
+            )
+            for window in windows:
+                tokenized.append(window)
+                ownership.append(text_index)
+
+        if not tokenized:
+            return ["" for _ in texts]
+
+        decoded = self._translate_windows(tokenized)
+        grouped: list[list[str]] = [[] for _ in texts]
+        for owner, translated_text in zip(ownership, decoded):
+            if translated_text:
+                grouped[owner].append(translated_text)
+
+        translated = [
+            " ".join(part for part in group if part).strip()
+            for group in grouped
+        ]
+
+        # Retry only suspicious outputs. A smaller semantic window plus a wider
+        # beam is slower, but the cost is paid only for chunks that look like
+        # runaway decoding or token-fragment leakage.
+        for index, (source, output) in enumerate(zip(texts, translated)):
+            original_score = _degeneracy_score(str(source), output)
+            if original_score <= 0:
+                continue
+            retry_windows = _semantic_token_windows(
+                str(source),
+                self.source_sp,
+                self.max_input_tokens,
+                max(48, self.segment_tokens // 2),
+            )
+            retry_output = " ".join(
+                part for part in self._translate_windows(retry_windows, retry=True) if part
+            ).strip()
+            if retry_output and _degeneracy_score(str(source), retry_output) < original_score:
+                translated[index] = retry_output
+        return translated
 
 
 def translate_sections_fast(
