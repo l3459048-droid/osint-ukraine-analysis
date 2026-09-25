@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-PIPELINE_VERSION = 4
+PIPELINE_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS documents (
     error TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     language TEXT,
-    pipeline_version INTEGER NOT NULL DEFAULT 4
+    pipeline_version INTEGER NOT NULL DEFAULT 5
 );
 CREATE INDEX IF NOT EXISTS idx_documents_source_path ON documents(source_path);
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
