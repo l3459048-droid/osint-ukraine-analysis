@@ -23,6 +23,7 @@ fasttranslate = [
   "transformers>=5,<6",
   "huggingface-hub>=1,<2",
   "torch>=2.2,<3",
+  "accelerate>=1,<2",
 ]
 all = [
   "Pillow>=10,<13",
@@ -34,6 +35,7 @@ all = [
   "transformers>=5,<6",
   "huggingface-hub>=1,<2",
   "torch>=2.2,<3",
+  "accelerate>=1,<2",
 ]
 dev = ["pytest>=8,<10"]
 
