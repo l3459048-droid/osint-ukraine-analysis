@@ -123,6 +123,40 @@ def translate_document(
             if fast_model_ready(settings, src, dst):
                 if progress:
                     progress(0, len(sections), f"Using Fast Translation · CTranslate2 INT8 · {src}→{dst}")
+
+                quality_fallback = None
+                fallback_enabled = (
+                    selected_engine == "auto"
+                    and bool(settings.translation.get("quality_fallback_enabled", True))
+                    and argos_available()
+                )
+                if fallback_enabled:
+                    allow_quality_install = bool(
+                        settings.translation.get("quality_fallback_auto_install", False)
+                    )
+                    pair_ready = (src, dst) in installed_pairs()
+                    fallback_state = {"translator": None, "failed": False}
+
+                    if pair_ready or (allow_quality_install and allow_model_install):
+                        def quality_fallback(value: str) -> str:
+                            if fallback_state["failed"]:
+                                return ""
+                            if fallback_state["translator"] is None:
+                                try:
+                                    fallback_state["translator"] = _get_argos_translator(
+                                        src,
+                                        dst,
+                                        settings,
+                                        allow_model_install=(
+                                            allow_quality_install and allow_model_install
+                                        ),
+                                        progress=progress,
+                                    )
+                                except Exception:
+                                    fallback_state["failed"] = True
+                                    return ""
+                            return fallback_state["translator"](value, src, dst)
+
                 translated, fast_stats = translate_sections_fast(
                     settings,
                     sha256,
@@ -131,6 +165,7 @@ def translate_document(
                     dst,
                     progress=progress,
                     should_pause=should_pause,
+                    fallback_translator=quality_fallback,
                 )
                 engine_name = fast_stats.engine
                 engine_meta = {
@@ -143,6 +178,9 @@ def translate_document(
                     "chars_translated": fast_stats.chars_translated,
                     "chars_per_second": round(fast_stats.chars_per_second, 2),
                     "page_batch": fast_stats.page_batch,
+                    "quality_retries": fast_stats.quality_retries,
+                    "quality_fallbacks": fast_stats.quality_fallbacks,
+                    "quality_warnings": fast_stats.quality_warnings,
                 }
             elif selected_engine == "fast":
                 raise RuntimeError(
