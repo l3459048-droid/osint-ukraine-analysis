@@ -11,6 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .translation_literals import (
+    missing_protected_literals,
+    protect_literals,
+    restore_literals,
+    translate_preserving_literals,
+)
+
 FAST_MODELS = {
     ("en", "ru"): "Helsinki-NLP/opus-mt-en-ru",
     ("uk", "ru"): "Helsinki-NLP/opus-mt-uk-ru",
@@ -25,7 +32,7 @@ FAST_SOURCE_EOS_TOKEN = "</s>"
 FAST_RETRY_BEAM_SIZE = 8
 FAST_RETRY_REPETITION_PENALTY = 1.12
 FAST_RETRY_NO_REPEAT_NGRAM_SIZE = 3
-FAST_TRANSLATION_PIPELINE_VERSION = 5
+FAST_TRANSLATION_PIPELINE_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,7 @@ class FastTranslationStats:
     quality_retries: int
     quality_fallbacks: int
     quality_warnings: int
+    literal_segment_fallbacks: int
 
 
 def fast_translation_available() -> bool:
@@ -436,6 +444,10 @@ def _translation_quality_score(
         if ratio < 0.45 or ratio > 1.95:
             score += 2
 
+    missing_literals = missing_protected_literals(source, translated)
+    if missing_literals:
+        score += 10 + min(10, len(missing_literals) * 2)
+
     source_numbers = set(re.findall(r"(?<!\w)\d+(?:[.,:/-]\d+)*(?!\w)", source))
     missing_numbers = [token for token in source_numbers if token not in translated]
     score += min(3, len(missing_numbers))
@@ -537,6 +549,7 @@ class FastTranslator:
         self.quality_retries = 0
         self.quality_fallbacks = 0
         self.quality_warnings = 0
+        self.literal_segment_fallbacks = 0
         self.quality_retry_score = max(
             1,
             int(settings.translation.get("quality_retry_score", 2) or 2),
@@ -563,6 +576,23 @@ class FastTranslator:
             decoded.append(self.target_sp.decode(pieces).strip())
         return decoded
 
+    def _translate_raw_text(
+        self,
+        text: str,
+        *,
+        retry: bool = False,
+        segment_tokens: int | None = None,
+    ) -> str:
+        windows = _semantic_token_windows(
+            str(text),
+            self.source_sp,
+            self.max_input_tokens,
+            segment_tokens if segment_tokens is not None else self.segment_tokens,
+        )
+        return " ".join(
+            part for part in self._translate_windows(windows, retry=retry) if part
+        ).strip()
+
     def translate_texts(
         self,
         texts: Sequence[str],
@@ -571,9 +601,13 @@ class FastTranslator:
     ) -> list[str]:
         tokenized: list[list[str]] = []
         ownership: list[int] = []
-        for text_index, text in enumerate(texts):
+        protections = []
+
+        for text_index, text_value in enumerate(texts):
+            protection = protect_literals(str(text_value))
+            protections.append(protection)
             windows = _semantic_token_windows(
-                str(text),
+                protection.masked_text,
                 self.source_sp,
                 self.max_input_tokens,
                 self.segment_tokens,
@@ -591,14 +625,22 @@ class FastTranslator:
             if translated_text:
                 grouped[owner].append(translated_text)
 
-        translated = [
-            " ".join(part for part in group if part).strip()
-            for group in grouped
-        ]
+        translated: list[str] = []
+        for source_value, protection, group in zip(texts, protections, grouped):
+            source = str(source_value)
+            raw_output = " ".join(part for part in group if part).strip()
+            restored, intact = restore_literals(protection, raw_output)
+            if not intact:
+                restored, _ = translate_preserving_literals(
+                    source,
+                    lambda value: self._translate_raw_text(value),
+                )
+                self.literal_segment_fallbacks += 1
+            translated.append(_restore_source_urls(source, restored))
 
         for index, (source_value, output) in enumerate(zip(texts, translated)):
             source = str(source_value)
-            best_output = _restore_source_urls(source, output)
+            best_output = output
             best_score = _translation_quality_score(
                 source,
                 best_output,
@@ -607,17 +649,16 @@ class FastTranslator:
 
             if best_score >= self.quality_retry_score:
                 self.quality_retries += 1
-                retry_windows = _semantic_token_windows(
+                retry_output, retry_intact = translate_preserving_literals(
                     source,
-                    self.source_sp,
-                    self.max_input_tokens,
-                    max(48, self.segment_tokens // 2),
+                    lambda value: self._translate_raw_text(
+                        value,
+                        retry=True,
+                        segment_tokens=max(48, self.segment_tokens // 2),
+                    ),
                 )
-                retry_output = " ".join(
-                    part
-                    for part in self._translate_windows(retry_windows, retry=True)
-                    if part
-                ).strip()
+                if not retry_intact:
+                    self.literal_segment_fallbacks += 1
                 retry_output = _restore_source_urls(source, retry_output)
                 retry_score = _translation_quality_score(
                     source,
@@ -633,7 +674,7 @@ class FastTranslator:
                 and fallback_translator is not None
             ):
                 try:
-                    fallback_output = fallback_translator(source).strip()
+                    fallback_output = str(fallback_translator(source) or "").strip()
                 except Exception:
                     fallback_output = ""
                 fallback_output = _restore_source_urls(source, fallback_output)
@@ -816,6 +857,7 @@ def translate_sections_fast(
         quality_retries=getattr(engine, "quality_retries", 0),
         quality_fallbacks=getattr(engine, "quality_fallbacks", 0),
         quality_warnings=getattr(engine, "quality_warnings", 0),
+        literal_segment_fallbacks=getattr(engine, "literal_segment_fallbacks", 0),
     )
     return translated, stats
 
