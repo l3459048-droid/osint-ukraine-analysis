@@ -257,6 +257,7 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 <div><span>Ollama</span><strong>{_e(ollama)}</strong><small>{_e(model_text)}</small></div>
 <div><span>OCR / Tesseract</span><strong>{_e("Ready" if status.get("tesseract") else "Not found")}</strong><small>{_e(tesseract)}</small></div>
 <div><span>Automatic cycle</span><strong>{_e(background_state)}</strong><small>Every {int(status.get("background_interval", 0))}s</small></div>
+<div><span>Adaptive taxonomy</span><strong>{int(status.get("taxonomy_categories", 0))} categories · {int(status.get("taxonomy_topics", 0))} topics</strong><small>{"Rebuild needed" if status.get("taxonomy_stale") else "Current"} · <a href="/taxonomy">Open Corpus</a></small></div>
 </div>
 </section>
 <section class="panel fast-translation-panel">
