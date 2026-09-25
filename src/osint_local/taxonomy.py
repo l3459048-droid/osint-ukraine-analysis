@@ -226,12 +226,20 @@ def build_adaptive_taxonomy(
             }
             for item in topic_records
         ]
+        growth_trigger, unassigned_trigger = _discovery_thresholds(
+            document_count=len(documents),
+            discovery_document_count=len(documents),
+            taxonomy_config=taxonomy_config,
+        )
         details = {
             "embedding_signature": db.embedding_signature(model),
             "discovery_embedding_signature": db.embedding_signature(model),
             "discovery_document_count": len(documents),
             "last_refresh_mode": "full",
             "last_full_rebuild_at": finished_at,
+            "incremental_refreshes_since_discovery": 0,
+            "growth_trigger": growth_trigger,
+            "unassigned_trigger": unassigned_trigger,
             "documents_with_vectors": len(documents),
             "assigned_documents": len(assigned_documents),
             "unassigned_documents": max(0, len(documents) - len(assigned_documents)),
@@ -267,6 +275,40 @@ def build_adaptive_taxonomy(
     except Exception as exc:
         db.fail_taxonomy_run(run_id, finished_at=_now(), error=str(exc))
         raise
+
+
+def _discovery_thresholds(
+    *,
+    document_count: int,
+    discovery_document_count: int,
+    taxonomy_config: dict,
+) -> tuple[int, int]:
+    min_growth = max(
+        1,
+        int(taxonomy_config.get("full_rebuild_min_growth", 30) or 30),
+    )
+    growth_ratio = max(
+        0.0,
+        float(taxonomy_config.get("full_rebuild_growth_ratio", 0.10) or 0.10),
+    )
+    growth_trigger = max(
+        min_growth,
+        int(math.ceil(max(1, discovery_document_count) * growth_ratio)),
+    )
+
+    min_unassigned = max(
+        1,
+        int(taxonomy_config.get("discovery_min_unassigned", 8) or 8),
+    )
+    unassigned_ratio = max(
+        0.0,
+        float(taxonomy_config.get("discovery_unassigned_ratio", 0.03) or 0.03),
+    )
+    unassigned_trigger = max(
+        min_unassigned,
+        int(math.ceil(max(1, document_count) * unassigned_ratio)),
+    )
+    return growth_trigger, unassigned_trigger
 
 
 def refresh_adaptive_taxonomy(
@@ -351,41 +393,41 @@ def refresh_adaptive_taxonomy(
         ),
     )
     growth = max(0, len(documents) - discovery_count)
-    min_growth = max(
+    shrink = max(0, discovery_count - len(documents))
+    growth_trigger, unassigned_trigger = _discovery_thresholds(
+        document_count=len(documents),
+        discovery_document_count=discovery_count,
+        taxonomy_config=taxonomy_config,
+    )
+    refresh_limit = max(
         1,
-        int(taxonomy_config.get("full_rebuild_min_growth", 30) or 30),
+        int(
+            taxonomy_config.get(
+                "full_rebuild_after_incremental_refreshes",
+                20,
+            )
+            or 20
+        ),
     )
-    growth_ratio = max(
-        0.0,
-        float(taxonomy_config.get("full_rebuild_growth_ratio", 0.10) or 0.10),
-    )
-    growth_trigger = max(
-        min_growth,
-        int(math.ceil(discovery_count * growth_ratio)),
-    )
-
-    min_unassigned = max(
-        1,
-        int(taxonomy_config.get("discovery_min_unassigned", 8) or 8),
-    )
-    unassigned_ratio = max(
-        0.0,
-        float(taxonomy_config.get("discovery_unassigned_ratio", 0.03) or 0.03),
-    )
-    unassigned_trigger = max(
-        min_unassigned,
-        int(math.ceil(max(1, len(documents)) * unassigned_ratio)),
-    )
+    refresh_count = int(
+        details.get("incremental_refreshes_since_discovery") or 0
+    ) + 1
 
     needs_rebuild = (
         growth >= growth_trigger
+        or shrink >= growth_trigger
         or unassigned >= unassigned_trigger
+        or refresh_count >= refresh_limit
     )
     reason = ""
     if growth >= growth_trigger:
         reason = "corpus_growth"
+    elif shrink >= growth_trigger:
+        reason = "corpus_shrink"
     elif unassigned >= unassigned_trigger:
         reason = "novel_documents"
+    elif refresh_count >= refresh_limit:
+        reason = "periodic_refresh_limit"
 
     result = {
         "mode": "incremental",
@@ -396,8 +438,11 @@ def refresh_adaptive_taxonomy(
         "unassigned_documents": unassigned,
         "coverage": round(assigned / max(1, len(documents)), 4),
         "growth_since_discovery": growth,
+        "shrink_since_discovery": shrink,
         "growth_trigger": growth_trigger,
         "unassigned_trigger": unassigned_trigger,
+        "incremental_refreshes_since_discovery": refresh_count,
+        "incremental_refresh_limit": refresh_limit,
         "topics": len(topic_records),
         "categories": len(category_records),
     }
@@ -419,8 +464,11 @@ def refresh_adaptive_taxonomy(
             "last_refresh_mode": "incremental",
             "last_incremental_at": refreshed_at,
             "growth_since_discovery": growth,
+            "shrink_since_discovery": shrink,
             "growth_trigger": growth_trigger,
             "unassigned_trigger": unassigned_trigger,
+            "incremental_refreshes_since_discovery": refresh_count,
+            "incremental_refresh_limit": refresh_limit,
         }
     )
     db.refresh_taxonomy_assignments(
