@@ -2859,3 +2859,239 @@ def test_protected_literals_fallback_on_reordered_or_duplicated_placeholders():
     )
     assert normal_path is False
     assert output.index("J3") < output.index("01.09.2026") < output.index("240")
+
+
+
+def test_quality_layout_translation_preserves_stable_block_mapping():
+    import osint_local.translation as translation
+
+    class FakeQuality:
+        source_lang = "uk"
+        target_lang = "ru"
+        model_id = "fake/m2m100"
+
+        def translate_text(self, value):
+            return "RU[" + value + "]"
+
+    layout = {
+        "version": 1,
+        "document_sha256": "a" * 64,
+        "source_path": "form.pdf",
+        "pages": [
+            {
+                "page": 1,
+                "width": 600.0,
+                "height": 800.0,
+                "rotation": 0,
+                "blocks": [
+                    {
+                        "id": "p0001-b0001",
+                        "bbox": [50.0, 90.0, 250.0, 110.0],
+                        "lines": [
+                            {
+                                "id": "p0001-b0001-l0001",
+                                "text": "Освітня програма",
+                                "spans": [],
+                            }
+                        ],
+                    },
+                    {
+                        "id": "p0001-b0002",
+                        "bbox": [300.0, 90.0, 500.0, 110.0],
+                        "lines": [
+                            {
+                                "id": "p0001-b0002-l0001",
+                                "text": "Туризм та рекреація",
+                                "spans": [],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+
+    sections, artifact = translation._translate_layout_quality(
+        layout,
+        FakeQuality(),
+    )
+
+    assert sections == [
+        (
+            1,
+            "RU[Освітня програма]\n\nRU[Туризм та рекреація]",
+        )
+    ]
+    blocks = artifact["pages"][0]["blocks"]
+    assert blocks[0]["id"] == "p0001-b0001"
+    assert blocks[0]["bbox"] == [50.0, 90.0, 250.0, 110.0]
+    assert blocks[0]["source_text"] == "Освітня програма"
+    assert blocks[0]["translated_text"] == "RU[Освітня програма]"
+    assert artifact["engine"] == "m2m100-418m-int8"
+
+
+def test_quality_pdf_translation_persists_layout_translation_artifact(tmp_path: Path, monkeypatch):
+    import fitz
+    import osint_local.translation as translation
+
+    config_path = make_config(tmp_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["allowed_extensions"] = [".pdf"]
+    config["ocr"] = {"enabled": False}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    settings = load_settings(config_path)
+    settings.input_dir.mkdir(parents=True)
+    pdf_path = settings.input_dir / "quality-layout.pdf"
+
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((50, 100), "Educational programme")
+    page.insert_text((300, 100), "Tourism")
+    doc.save(pdf_path)
+    doc.close()
+
+    class FakeQuality:
+        source_lang = "en"
+        target_lang = "ru"
+        model_id = "fake/m2m100"
+        compute_type = "int8"
+        literal_segment_fallbacks = 0
+
+        def __init__(self, settings, source_lang, target_lang):
+            self.source_lang = source_lang
+            self.target_lang = target_lang
+
+        def translate_text(self, value):
+            return "RU[" + value + "]"
+
+        def translate_texts(self, values):
+            return [self.translate_text(value) for value in values]
+
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(pdf_path)
+        assert processed.status == "processed"
+        monkeypatch.setattr(translation, "quality_translation_available", lambda: True)
+        monkeypatch.setattr(translation, "quality_model_ready", lambda _settings: True)
+        monkeypatch.setattr(translation, "QualityTranslator", FakeQuality)
+
+        result = translation.translate_document(
+            settings,
+            pipeline.db,
+            processed.sha256,
+            source_lang="en",
+            target_lang="ru",
+            engine="quality",
+            allow_model_install=False,
+        )
+
+        assert result["layout_translation"] is True
+        layout_path = Path(result["layout_translation_path"])
+        assert layout_path.is_file()
+        artifact = json.loads(layout_path.read_text(encoding="utf-8"))
+        assert artifact["document_sha256"] == processed.sha256
+        assert artifact["pages"][0]["blocks"]
+        assert all(
+            block["translated_text"].startswith("RU[")
+            for block in artifact["pages"][0]["blocks"]
+        )
+    finally:
+        pipeline.close()
+
+
+def test_layout_pdf_export_preserves_geometry_and_vector_lines(tmp_path: Path):
+    import fitz
+
+    import osint_local.translation as translation
+    from osint_local.translation_export import export_translation_layout_pdf
+
+    config_path = make_config(tmp_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["allowed_extensions"] = [".pdf"]
+    config["ocr"] = {"enabled": False}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    settings = load_settings(config_path)
+    settings.input_dir.mkdir(parents=True)
+    source_pdf = settings.input_dir / "form.pdf"
+
+    source_doc = fitz.open()
+    page = source_doc.new_page(width=600, height=800)
+    page.insert_text((60, 100), "Original field")
+    page.draw_line((50, 120), (500, 120), color=(0, 0, 0), width=1)
+    source_doc.save(source_pdf)
+    source_doc.close()
+
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(source_pdf)
+        source_layout = json.loads(
+            (settings.layout_dir / f"{processed.sha256}.json").read_text(encoding="utf-8")
+        )
+
+        class FakeQuality:
+            source_lang = "en"
+            target_lang = "ru"
+            model_id = "fake/m2m100"
+
+            def translate_text(self, value):
+                return "Переведенное поле"
+
+        _sections, translated_layout = translation._translate_layout_quality(
+            source_layout,
+            FakeQuality(),
+        )
+
+        output_dir = settings.translations_dir / "ru"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path = output_dir / f"form.{processed.sha256[:10]}.ru.md"
+        markdown_path.write_text(
+            "# Translation — form.pdf\n\n"
+            "- Generated: test\n\n"
+            "## Page 1\n\nПереведенное поле\n",
+            encoding="utf-8",
+        )
+        layout_path = markdown_path.with_suffix(".layout.json")
+        layout_path.write_text(
+            json.dumps(translated_layout, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        pipeline.db.save_translation(
+            sha256=processed.sha256,
+            source_lang="en",
+            target_lang="ru",
+            output_path=str(markdown_path),
+            created_at="2026-09-25T00:00:00+00:00",
+            engine="m2m100-418m-int8",
+        )
+
+        output_pdf = export_translation_layout_pdf(
+            settings,
+            pipeline.db,
+            processed.sha256,
+            "en",
+            "ru",
+        )
+        assert output_pdf.is_file()
+
+        rendered = fitz.open(output_pdf)
+        try:
+            assert rendered.page_count == 1
+            out_page = rendered[0]
+            assert round(out_page.rect.width, 2) == 600.0
+            assert round(out_page.rect.height, 2) == 800.0
+            extracted = out_page.get_text("text")
+            assert "Переведенное" in extracted
+            assert "Original field" not in extracted
+            assert len(out_page.get_drawings()) >= 1
+        finally:
+            rendered.close()
+
+        export_meta = json.loads(
+            output_pdf.with_suffix(output_pdf.suffix + ".json").read_text(encoding="utf-8")
+        )
+        assert export_meta["translated_blocks"] >= 1
+        assert export_meta["overflow_blocks"] == 0
+    finally:
+        pipeline.close()
