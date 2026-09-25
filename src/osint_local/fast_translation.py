@@ -718,10 +718,13 @@ def translate_sections_fast(
             )
             batch_texts = texts_to_translate[start_index:start_index + text_batch]
             batch_owners = owners[start_index:start_index + text_batch]
-            translated_batch = engine.translate_texts(
-                batch_texts,
-                fallback_translator=fallback_translator,
-            )
+            if fallback_translator is None:
+                translated_batch = engine.translate_texts(batch_texts)
+            else:
+                translated_batch = engine.translate_texts(
+                    batch_texts,
+                    fallback_translator=fallback_translator,
+                )
             if len(translated_batch) != len(batch_texts):
                 raise RuntimeError(
                     "Fast Translation returned an unexpected number of results"
@@ -770,6 +773,16 @@ def translate_sections_fast(
                 total,
                 f"Fast Translation · {page_label} · {rate:.1f} pages/min"
                 f" · {chars_per_second:.0f} chars/s"
+                + (
+                    f" · quality retry {getattr(engine, 'quality_retries', 0)}"
+                    if getattr(engine, "quality_retries", 0)
+                    else ""
+                )
+                + (
+                    f" · fallback {getattr(engine, 'quality_fallbacks', 0)}"
+                    if getattr(engine, "quality_fallbacks", 0)
+                    else ""
+                )
                 + (f" · ETA {eta:.1f} min" if remaining else ""),
             )
 
@@ -794,9 +807,9 @@ def translate_sections_fast(
         pages_per_minute=pages_per_minute,
         chars_per_second=chars_per_second,
         page_batch=page_batch,
-        quality_retries=engine.quality_retries,
-        quality_fallbacks=engine.quality_fallbacks,
-        quality_warnings=engine.quality_warnings,
+        quality_retries=getattr(engine, "quality_retries", 0),
+        quality_fallbacks=getattr(engine, "quality_fallbacks", 0),
+        quality_warnings=getattr(engine, "quality_warnings", 0),
     )
     return translated, stats
 
