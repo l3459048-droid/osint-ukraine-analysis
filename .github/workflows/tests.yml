@@ -45,6 +45,6 @@ jobs:
       - name: Validate dependency graph
         run: python -m pip check
       - name: Import Fast Translation stack
-        run: python -c "import ctranslate2, sentencepiece, transformers, sentence_transformers, argostranslate; print(ctranslate2.__version__, transformers.__version__, sentence_transformers.__version__)"
+        run: python -c "import ctranslate2, sentencepiece, transformers, sentence_transformers, argostranslate, accelerate; print(ctranslate2.__version__, transformers.__version__, sentence_transformers.__version__, accelerate.__version__)"
       - name: Run test suite on Windows
         run: pytest -q
