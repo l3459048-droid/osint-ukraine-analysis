@@ -877,6 +877,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.server.csrf_token,
                 analysis_mode,
                 categories=self.db.category_counts(),
+                taxonomy_categories=self.db.list_taxonomy_categories(limit=200),
+                taxonomy_topics=self.db.list_taxonomy_topics(limit=500),
                 folders=self.db.folder_choices(),
                 documents=self.db.list_documents(limit=500),
             ),
@@ -1259,6 +1261,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         domain = data.get("domain", "").strip()
         if domain:
             filters["domain"] = domain
+
+        taxonomy_category = data.get("taxonomy_category", "").strip()
+        if taxonomy_category:
+            filters["taxonomy_category"] = taxonomy_category
+
+        taxonomy_topic = data.get("taxonomy_topic", "").strip()
+        if taxonomy_topic:
+            filters["taxonomy_topic"] = taxonomy_topic
 
         folder = data.get("folder", "").strip().replace("\\", "/").strip("/")
         if folder:
