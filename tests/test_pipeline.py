@@ -4142,3 +4142,237 @@ def test_web_corpus_novel_and_topic_detail_views(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_taxonomy_label_override_applies_immediately_and_survives_rebuild(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import build_adaptive_taxonomy
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.taxonomy["min_documents"] = 2
+    settings.taxonomy["min_topic_documents"] = 2
+    settings.taxonomy["topic_similarity"] = 0.75
+    settings.taxonomy["topic_merge_similarity"] = 0.95
+    settings.taxonomy["category_similarity"] = 0.75
+    settings.taxonomy["category_merge_similarity"] = 0.95
+    settings.taxonomy["label_with_ollama"] = False
+
+    pipeline = LocalPipeline(settings)
+    try:
+        for index, vector in enumerate(([1.0, 0.0], [0.98, 0.02])):
+            source = settings.input_dir / f"drone-{index}.txt"
+            source.write_text(
+                f"FPV drone operations document {index}",
+                encoding="utf-8",
+            )
+            result = pipeline.process_file(source)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            normalized = _normalize_vector(vector)
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        len(normalized),
+                        _vector_to_blob(normalized),
+                    )
+                ]
+            )
+
+        first = build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+        assert first["topics"] == 1
+        topic = pipeline.db.list_taxonomy_topics(limit=10)[0]
+
+        pipeline.db.save_taxonomy_label_override(
+            kind="topic",
+            source_key=topic["topic_key"],
+            name="FPV Operations",
+            description="Pinned human label",
+            updated_at="2026-09-25T00:00:00+00:00",
+        )
+        immediate = pipeline.db.get_taxonomy_topic(topic["topic_key"])
+        assert immediate["name"] == "FPV Operations"
+        assert immediate["description"] == "Pinned human label"
+        assert immediate["source"] == "manual"
+
+        extra = settings.input_dir / "drone-extra.txt"
+        extra.write_text("FPV drone mission planning", encoding="utf-8")
+        extra_result = pipeline.process_file(extra)
+        extra_chunk = pipeline.db.chunks_for_document(extra_result.sha256, limit=1)[0]
+        normalized = _normalize_vector([0.99, 0.01])
+        pipeline.db.save_embeddings(
+            [
+                (
+                    extra_chunk["id"],
+                    settings.search["model"],
+                    len(normalized),
+                    _vector_to_blob(normalized),
+                )
+            ]
+        )
+
+        second = build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+        assert second["topics"] == 1
+        rebuilt = pipeline.db.list_taxonomy_topics(limit=10)[0]
+        assert rebuilt["name"] == "FPV Operations"
+        assert rebuilt["description"] == "Pinned human label"
+    finally:
+        pipeline.close()
+
+
+def test_taxonomy_label_override_can_be_deleted(tmp_path: Path):
+    from array import array
+
+    settings = load_settings(make_config(tmp_path))
+    pipeline = LocalPipeline(settings)
+    try:
+        vector = array("f", [1.0, 0.0]).tobytes()
+        now = "2026-09-25T00:00:00+00:00"
+        run_id = pipeline.db.begin_taxonomy_run(
+            started_at=now,
+            model=settings.search["model"],
+            document_count=0,
+            embedding_count=0,
+        )
+        pipeline.db.replace_taxonomy(
+            run_id=run_id,
+            finished_at=now,
+            categories=[
+                {
+                    "key": "category-demo",
+                    "name": "Automatic",
+                    "description": "Auto",
+                    "keywords_json": "[]",
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 0,
+                    "topic_count": 0,
+                    "source": "discovered",
+                }
+            ],
+            topics=[],
+            category_assignments=[],
+            topic_assignments=[],
+            details_json="{}",
+        )
+        pipeline.db.save_taxonomy_label_override(
+            kind="category",
+            source_key="category-demo",
+            name="Pinned Category",
+            description="Pinned",
+            updated_at=now,
+        )
+        assert len(
+            pipeline.db.list_taxonomy_label_overrides(kind="category")
+        ) == 1
+
+        pipeline.db.delete_taxonomy_label_override(
+            kind="category",
+            source_key="category-demo",
+        )
+        assert pipeline.db.list_taxonomy_label_overrides(kind="category") == []
+    finally:
+        pipeline.close()
+
+
+def test_web_can_pin_taxonomy_label(tmp_path: Path):
+    import re
+    import urllib.parse
+    import urllib.request
+    from array import array
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        vector = array("f", [1.0, 0.0]).tobytes()
+        now = "2026-09-25T00:00:00+00:00"
+        run_id = pipeline.db.begin_taxonomy_run(
+            started_at=now,
+            model=settings.search["model"],
+            document_count=0,
+            embedding_count=0,
+        )
+        pipeline.db.replace_taxonomy(
+            run_id=run_id,
+            finished_at=now,
+            categories=[
+                {
+                    "key": "category-demo",
+                    "name": "Automatic",
+                    "description": "Automatic description",
+                    "keywords_json": '["demo"]',
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 0,
+                    "topic_count": 0,
+                    "source": "discovered",
+                }
+            ],
+            topics=[],
+            category_assignments=[],
+            topic_assignments=[],
+            details_json="{}",
+        )
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(
+            base + "/taxonomy?category=category-demo",
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+        assert "Rename / pin label" in body
+        csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+        request = urllib.request.Request(
+            base + "/actions/taxonomy-label",
+            data=urllib.parse.urlencode(
+                {
+                    "csrf": csrf,
+                    "kind": "category",
+                    "key": "category-demo",
+                    "name": "Human Category",
+                    "description": "Human description",
+                }
+            ).encode(),
+            method="POST",
+        )
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPRedirectHandler()
+        )
+        with opener.open(request, timeout=5) as response:
+            response.read()
+
+        row = pipeline.db.get_taxonomy_category("category-demo")
+        assert row["name"] == "Human Category"
+        assert row["description"] == "Human description"
+        assert row["source"] == "manual"
+        overrides = pipeline.db.list_taxonomy_label_overrides(kind="category")
+        assert len(overrides) == 1
+        assert overrides[0]["name"] == "Human Category"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
