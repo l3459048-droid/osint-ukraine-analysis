@@ -1159,10 +1159,25 @@ def _apply_labels(
     labels: dict[str, dict[str, str]],
 ) -> None:
     used: Counter[str] = Counter()
+    # Manual pins are authoritative. Reserve their names first so automatic
+    # labels get disambiguated instead of mutating the pinned text.
+    for item in candidates:
+        if str(item.get("label_source") or "") != "manual":
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            used[name.casefold()] += 1
+
     for item in candidates:
         label = labels.get(item["key"]) or {}
         name = _clean_label(label.get("name"), 80) or item["name"]
         description = _clean_label(label.get("description"), 280) or item["description"]
+
+        if str(item.get("label_source") or "") == "manual":
+            item["name"] = name
+            item["description"] = description
+            continue
+
         normalized = name.casefold()
         used[normalized] += 1
         if used[normalized] > 1:
