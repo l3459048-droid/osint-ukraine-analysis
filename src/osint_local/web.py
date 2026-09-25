@@ -26,7 +26,7 @@ from .pipeline import LocalPipeline
 from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
 from .search import search_chunks
-from .translation import argos_available, installed_pairs, translation_queue_status
+from .translation import argos_available, installed_pairs, translate_document, translation_queue_status
 from .web_ui import (
     _action_panel,
     _activity_details,
@@ -80,6 +80,10 @@ class InteractiveGate:
     def active(self) -> bool:
         with self._lock:
             return self._count > 0
+
+    def count(self) -> int:
+        with self._lock:
+            return self._count
 
 
 class AskManager:
@@ -309,6 +313,116 @@ class ChatManager:
 
 
 
+class ManualTranslationManager:
+    """Run user-requested translation independently from background maintenance."""
+
+    def __init__(self, pipeline: LocalPipeline, gate: InteractiveGate | None = None) -> None:
+        self.pipeline = pipeline
+        self.gate = gate
+        self._lock = threading.RLock()
+        self._state = {
+            "kind": "translate",
+            "status": "idle",
+            "sha256": "",
+            "source_lang": "",
+            "target_lang": "ru",
+            "current": 0,
+            "total": 0,
+            "message": "Ready",
+            "error": "",
+            "result": None,
+        }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._state)
+
+    def start(self, sha256: str, source_lang: str, target_lang: str = "ru") -> dict:
+        source_lang = str(source_lang or "auto").strip().casefold()
+        target_lang = str(target_lang or "ru").strip().casefold()
+        if source_lang not in {"auto", "en", "uk"} or target_lang != "ru":
+            raise ValueError("Translation is limited to English/Ukrainian → Russian")
+
+        with self._lock:
+            if self._state.get("status") == "running":
+                raise ActionBusyError("Translation is already running")
+            self._state = {
+                "kind": "translate",
+                "status": "running",
+                "sha256": sha256,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "current": 0,
+                "total": 0,
+                "message": "Starting translation…",
+                "error": "",
+                "result": None,
+            }
+            initial = dict(self._state)
+            if self.gate is not None:
+                self.gate.acquire()
+            threading.Thread(
+                target=self._worker_guarded,
+                args=(sha256, source_lang, target_lang),
+                name="osint-local-manual-translate",
+                daemon=True,
+            ).start()
+            return initial
+
+    def _progress(self, current: int, total: int, message: str) -> None:
+        with self._lock:
+            if self._state.get("status") == "running":
+                self._state["current"] = max(0, int(current))
+                self._state["total"] = max(0, int(total))
+                self._state["message"] = str(message)
+
+    def _other_interactive_busy(self) -> bool:
+        # This translation owns one gate reference while running. A count > 1
+        # means Chat/Ask/Fast Setup also needs priority, so pause at a safe batch.
+        return self.gate is not None and self.gate.count() > 1
+
+    def _worker_guarded(self, sha256: str, source_lang: str, target_lang: str) -> None:
+        try:
+            self._worker(sha256, source_lang, target_lang)
+        finally:
+            if self.gate is not None:
+                self.gate.release()
+
+    def _worker(self, sha256: str, source_lang: str, target_lang: str) -> None:
+        try:
+            result = translate_document(
+                self.pipeline.settings,
+                self.pipeline.db,
+                sha256,
+                source_lang=source_lang,
+                target_lang=target_lang,
+                progress=self._progress,
+                should_pause=self._other_interactive_busy,
+                engine="auto",
+            )
+        except Exception as exc:
+            with self._lock:
+                self._state.update(
+                    status="failed",
+                    message="Translation failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                    result=None,
+                )
+            return
+
+        with self._lock:
+            self._state.update(
+                status="succeeded",
+                current=max(
+                    int(self._state.get("current") or 0),
+                    int(self._state.get("total") or 0),
+                ),
+                message="Translation complete",
+                error="",
+                result=result,
+            )
+
+
 class FastSetupManager:
     """Prepare Fast Translation models independently from library maintenance."""
 
@@ -413,6 +527,7 @@ class DashboardServer(ThreadingHTTPServer):
         self.actions = ActionManager(pipeline, interactive_busy=self.interactive.active)
         self.ask = AskManager(pipeline, self.interactive)
         self.chat = ChatManager(pipeline, self.interactive)
+        self.translation = ManualTranslationManager(pipeline, self.interactive)
         self.fast_setup = FastSetupManager(pipeline, self.interactive)
         self.csrf_token = secrets.token_urlsafe(32)
         self.folder_opener = folder_opener
@@ -741,7 +856,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 pairs=(installed_pairs() if argos_available() else set()) | (
                     fast_ready_pairs(self.settings) if fast_translation_available() else set()
                 ),
-                action=self.server.actions.snapshot(),
+                action=self.server.translation.snapshot(),
             ),
             '<section class="panel"><div class="panel-head"><h2>Extracted chunks</h2></div>',
         ]
@@ -824,12 +939,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "performance_profile": profile,
             "performance_label": profile_info.get("label", profile.title()),
             "action": self.server.actions.snapshot(),
+            "translation": self.server.translation.snapshot(),
             "fast_setup": self.server.fast_setup.snapshot(),
         }
 
     def _activity_payload(self) -> dict:
         return {
             "action": self.server.actions.snapshot(),
+            "translation": self.server.translation.snapshot(),
             "fast_setup": self.server.fast_setup.snapshot(),
             "stats": self._stats_payload(),
             "errors": self.db.recent_errors(limit=6),
@@ -1036,12 +1153,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            action = self.server.actions.start_translate(sha256, source_lang, target_lang)
-        except ActionBusyError as exc:
+            translation = self.server.translation.start(sha256, source_lang, target_lang)
+        except (ActionBusyError, ValueError) as exc:
             self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         if self.headers.get("X-Requested-With") == "fetch":
-            self._json({"action": action}, status=HTTPStatus.ACCEPTED)
+            self._json(
+                {"translation": translation, "action": translation},
+                status=HTTPStatus.ACCEPTED,
+            )
             return
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", f"/documents/{sha256}")
