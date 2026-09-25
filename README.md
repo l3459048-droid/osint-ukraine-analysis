@@ -101,13 +101,13 @@ osint-local translate <SHA256> --from auto
 
 ## Quality Translation + protected facts + persistent PDF layout v0.9.17
 
-В дополнение к Fast OPUS появился локальный **Quality Translation** engine на базе `facebook/m2m100_418M`, конвертируемый в CTranslate2 INT8. В System есть отдельная подготовка модели. В режиме Auto OPUS остаётся быстрым основным путём; M2M100 загружается лениво только для фрагментов, которые не прошли quality gate. Если Fast Translation вообще недоступен, уже подготовленный Quality engine может использоваться как основной локальный переводчик.
+В дополнение к Fast OPUS появился локальный **Quality Translation** engine на базе `facebook/m2m100_418M`, конвертируемый в CTranslate2 INT8. В System есть отдельная подготовка модели. В режиме Auto OPUS остаётся быстрым основным путём; M2M100 загружается лениво только для фрагментов, которые не прошли quality gate. Для важных документов в ручном Translate есть отдельный режим Quality, который переводит весь документ через M2M100; если Quality-модель подготовлена, он выбран по умолчанию. Если Fast Translation вообще недоступен, уже подготовленный Quality engine может использоваться как основной локальный переводчик.
 
 Для M2M100 используется его нативный multilingual contract: source language prefix (`__uk__` / `__en__`) во входе и target prefix `__ru__` при decoding, beam size 5. После подготовки выполняется небольшой benchmark на реальных UK→RU фрагментах проблемного образовательного PDF и сохраняется сравнение OPUS vs M2M100 по скорости, quality heuristics и reference similarity.
 
 ### Protected literals
 
-Критические факты теперь защищаются до передачи модели. В protected set входят даты, числа, URL, длинные SHA-like идентификаторы и коды вроде `J3`, `FQ`, `EHEA`, `QF-LLL`, `ECTS/ЄКТС`. Сначала они заменяются collision-resistant placeholders и после перевода восстанавливаются точно. Если модель повредила placeholder, pipeline автоматически переключается на segment-around-literals fallback: переводятся только текстовые промежутки, а исходные literals вставляются обратно без изменений.
+Критические факты теперь защищаются до передачи модели. В protected set входят даты, числа, URL, длинные SHA-like идентификаторы и нейтральные коды вроде `J3`, `FQ`, `EHEA`, `QF-LLL`, `ECTS/ЕКТС`. Украинские сокращения, которые должны меняться при переводе (например `ЄКТС` → `ЕКТС`), намеренно не замораживаются. Сначала они заменяются collision-resistant placeholders и после перевода восстанавливаются точно. Если модель повредила placeholder, pipeline автоматически переключается на segment-around-literals fallback: переводятся только текстовые промежутки, а исходные literals вставляются обратно без изменений.
 
 Quality gate рассматривает потерю protected literal как hard failure, а не как небольшой soft penalty. Это закрывает класс ошибок, где `01.09.2026` исчезала из перевода.
 
