@@ -18,6 +18,7 @@ from .fast_translation import (
     translate_sections_fast,
     _translation_quality_score,
 )
+from .translation_literals import translate_preserving_literals
 from .quality_translation import (
     QUALITY_MODEL_ID,
     QualityTranslator,
@@ -157,7 +158,14 @@ class _QualityFallbackRouter:
                         ),
                         progress=self.progress,
                     )
-                output = self._argos(value, self.source_lang, self.target_lang)
+                output, _ = translate_preserving_literals(
+                    value,
+                    lambda fragment: self._argos(
+                        fragment,
+                        self.source_lang,
+                        self.target_lang,
+                    ),
+                )
                 self.argos_candidate_calls += 1
                 if output:
                     candidates.append(
