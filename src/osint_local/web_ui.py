@@ -647,6 +647,7 @@ def _taxonomy_panel(
     )
 
     detail_html = _taxonomy_selection_detail(
+        csrf_token,
         selected_category_row,
         selected_topic_row,
         show_unassigned=show_unassigned,
@@ -673,6 +674,7 @@ def _taxonomy_panel(
 
 
 def _taxonomy_selection_detail(
+    csrf_token: str,
     category_row,
     topic_row,
     *,
@@ -713,10 +715,27 @@ def _taxonomy_selection_detail(
         heading = str(category_row["name"] or "Category")
 
     description = str(row["description"] or "").strip()
+    if topic_row:
+        kind = "topic"
+        source_key = str(topic_row["topic_key"])
+    else:
+        kind = "category"
+        source_key = str(category_row["category_key"])
+
     return f"""<section class="panel">
 <div class="panel-head"><div><h2>{_e(heading)}</h2><span class="panel-subtle">{subtitle}</span></div></div>
 <p>{_e(description) if description else "No description yet."}</p>
 <div class="badges">{keyword_html}</div>
+<details class="taxonomy-edit"><summary>Rename / pin label</summary>
+<form action="/actions/taxonomy-label" method="post" class="settings-form">
+<input type="hidden" name="csrf" value="{_e(csrf_token)}">
+<input type="hidden" name="kind" value="{_e(kind)}">
+<input type="hidden" name="key" value="{_e(source_key)}">
+<label>Name<input type="text" name="name" value="{_e(heading)}" maxlength="80" required></label>
+<label>Description<textarea name="description" rows="3" maxlength="280">{_e(description)}</textarea></label>
+<div class="settings-actions"><button type="submit">Save pinned label</button><button type="submit" name="reset" value="1" class="secondary">Reset to automatic</button></div>
+</form>
+</details>
 </section>"""
 
 
