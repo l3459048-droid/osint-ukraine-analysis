@@ -104,6 +104,7 @@
     "fast_compute_type": "int8",
     "fast_batch_tokens": 0,
     "fast_text_batch": 16,
+    "fast_page_batch": 4,
     "fast_max_input_tokens": 220,
     "fast_inter_threads": 0,
     "fast_intra_threads": 0,
