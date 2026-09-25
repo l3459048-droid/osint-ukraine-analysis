@@ -9,7 +9,11 @@ from typing import Any, Callable
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
 from .translation import next_passive_translation, translate_document
-from .taxonomy import build_adaptive_taxonomy, taxonomy_is_stale
+from .taxonomy import (
+    build_adaptive_taxonomy,
+    refresh_adaptive_taxonomy,
+    taxonomy_is_stale,
+)
 
 
 class ActionBusyError(RuntimeError):
@@ -239,18 +243,48 @@ class ActionManager:
             and taxonomy_is_stale(self.pipeline.db, settings.search)
         ):
             if self.interactive_busy():
-                self._progress(0, 0, "Background paused before taxonomy rebuild")
+                self._progress(0, 0, "Background paused before taxonomy update")
             else:
-                self._progress(0, 0, "Updating adaptive taxonomy…")
-                taxonomy_result = build_adaptive_taxonomy(
-                    self.pipeline.db,
-                    settings.search,
-                    settings.taxonomy,
-                    settings.qa,
-                    progress=lambda current, total, message: self._progress(
-                        current, total, message
-                    ),
-                )
+                latest_taxonomy = self.pipeline.db.latest_taxonomy_run()
+                if latest_taxonomy is None:
+                    self._progress(0, 0, "Discovering adaptive taxonomy…")
+                    taxonomy_result = build_adaptive_taxonomy(
+                        self.pipeline.db,
+                        settings.search,
+                        settings.taxonomy,
+                        settings.qa,
+                        progress=lambda current, total, message: self._progress(
+                            current, total, message
+                        ),
+                    )
+                else:
+                    self._progress(0, 0, "Refreshing adaptive taxonomy…")
+                    refresh_result = refresh_adaptive_taxonomy(
+                        self.pipeline.db,
+                        settings.search,
+                        settings.taxonomy,
+                        progress=lambda current, total, message: self._progress(
+                            current, total, message
+                        ),
+                    )
+                    if refresh_result.get("needs_rebuild"):
+                        self._progress(
+                            0,
+                            0,
+                            "New topics detected; rebuilding adaptive taxonomy…",
+                        )
+                        taxonomy_result = build_adaptive_taxonomy(
+                            self.pipeline.db,
+                            settings.search,
+                            settings.taxonomy,
+                            settings.qa,
+                            progress=lambda current, total, message: self._progress(
+                                current, total, message
+                            ),
+                        )
+                        taxonomy_result["trigger"] = refresh_result.get("reason") or ""
+                    else:
+                        taxonomy_result = refresh_result
 
         translated: list[str] = []
         if bool(settings.translation.get("passive_enabled", True)):
