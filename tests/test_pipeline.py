@@ -2750,3 +2750,81 @@ def test_full_quality_translation_preserves_form_units_and_page_boundaries():
     assert "Звичайне довше речення продовжується на наступному рядку." in page_one
     assert "\n\n" in page_one
     assert result[1][1] == "RU[ПЕРЕДМОВА]"
+
+
+
+def test_translate_document_clears_fast_checkpoint_for_hybrid_engine(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    import osint_local.translation as translation
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "hybrid.txt"
+    source.write_text("Освітня програма J3 від 01.09.2026 р.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    cleared = []
+    try:
+        processed = pipeline.process_file(source)
+
+        monkeypatch.setattr(translation, "fast_translation_available", lambda: True)
+        monkeypatch.setattr(translation, "fast_model_ready", lambda *args: True)
+
+        class FakeRouter:
+            available = True
+            def __init__(self, *args, **kwargs):
+                pass
+            def __call__(self, value):
+                return "Качественный перевод J3 от 01.09.2026 г."
+            def metadata(self):
+                return {
+                    "quality_selected": 1,
+                    "argos_selected": 0,
+                    "selected_engines": {"m2m100-418m-int8": 1, "argos-translate": 0},
+                }
+
+        monkeypatch.setattr(translation, "_QualityFallbackRouter", FakeRouter)
+
+        def fake_fast(settings, sha256, sections, source_lang, target_lang="ru", **kwargs):
+            return (
+                [(page, "Перевод J3 01.09.2026") for page, _ in sections],
+                SimpleNamespace(
+                    engine="ctranslate2-int8",
+                    model="fake-opus",
+                    compute_type="int8",
+                    inter_threads=1,
+                    intra_threads=1,
+                    pages_per_minute=1.0,
+                    elapsed_seconds=1.0,
+                    chars_translated=10,
+                    chars_per_second=10.0,
+                    page_batch=1,
+                    quality_retries=1,
+                    quality_fallbacks=1,
+                    quality_warnings=0,
+                    literal_segment_fallbacks=0,
+                ),
+            )
+
+        monkeypatch.setattr(translation, "translate_sections_fast", fake_fast)
+        monkeypatch.setattr(
+            translation,
+            "clear_fast_checkpoint",
+            lambda settings, sha256, target_lang="ru": cleared.append((sha256, target_lang)),
+        )
+
+        result = translation.translate_document(
+            settings,
+            pipeline.db,
+            processed.sha256,
+            source_lang="uk",
+            target_lang="ru",
+            engine="auto",
+            allow_model_install=False,
+        )
+
+        assert result["engine"] == "hybrid-ct2-quality"
+        assert cleared == [(processed.sha256, "ru")]
+    finally:
+        pipeline.close()
