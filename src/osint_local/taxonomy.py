@@ -167,84 +167,33 @@ def build_adaptive_taxonomy(
 
         if progress:
             progress(4, 6, "Assigning documents to topics and categories…")
-        topic_assignments: list[tuple[str, str, float]] = []
-        category_scores: dict[tuple[str, str], float] = {}
-        assigned_documents: set[str] = set()
-        topic_documents: dict[str, set[str]] = defaultdict(set)
-        category_documents: dict[str, set[str]] = defaultdict(set)
-        assignment_threshold = float(
-            taxonomy_config.get("topic_assignment_similarity", 0.68)
-        )
-        max_topics_per_document = max(
-            1,
-            int(taxonomy_config.get("max_topics_per_document", 4) or 4),
-        )
-
         primary_topic: dict[str, str] = {}
         for topic in topic_records:
             for member in topic["cluster"]["members"]:
                 primary_topic[str(member["id"])] = topic["key"]
 
-        for document in documents:
-            sha256 = str(document["id"])
-            scored_topics = sorted(
-                (
-                    (_dot(document["vector"], topic["vector"]), topic)
-                    for topic in topic_records
-                ),
-                key=lambda item: item[0],
-                reverse=True,
-            )
-            selected: list[tuple[float, dict[str, Any]]] = [
-                (score, topic)
-                for score, topic in scored_topics
-                if score >= assignment_threshold
-            ][:max_topics_per_document]
-
-            primary_key = primary_topic.get(sha256)
-            if primary_key and all(
-                topic["key"] != primary_key for _, topic in selected
-            ):
-                primary = next(
-                    (topic for topic in topic_records if topic["key"] == primary_key),
-                    None,
-                )
-                if primary is not None:
-                    selected.append(
-                        (_dot(document["vector"], primary["vector"]), primary)
-                    )
-
-            for score, topic in selected:
-                score = max(0.0, float(score))
-                topic_assignments.append((sha256, topic["key"], score))
-                topic_documents[topic["key"]].add(sha256)
-                assigned_documents.add(sha256)
-
-                category_key = topic.get("category_key")
-                if category_key:
-                    category = category_lookup[category_key]
-                    category_score = max(
-                        0.0,
-                        _dot(document["vector"], category["vector"]),
-                    )
-                    key = (sha256, category_key)
-                    category_scores[key] = max(
-                        category_scores.get(key, 0.0),
-                        category_score,
-                    )
-                    category_documents[category_key].add(sha256)
+        assignments = _assign_documents_to_taxonomy(
+            documents,
+            topic_records,
+            category_records,
+            taxonomy_config,
+            primary_topic=primary_topic,
+        )
+        topic_assignments = assignments["topic_assignments"]
+        category_assignments = assignments["category_assignments"]
+        assigned_documents = assignments["assigned_documents"]
+        topic_document_counts = assignments["topic_document_counts"]
+        category_document_counts = assignments["category_document_counts"]
+        assignment_threshold = assignments["assignment_threshold"]
+        max_topics_per_document = assignments["max_topics_per_document"]
 
         for topic in topic_records:
-            topic["document_count"] = len(topic_documents.get(topic["key"], set()))
+            topic["document_count"] = topic_document_counts.get(topic["key"], 0)
         for category in category_records:
-            category["document_count"] = len(
-                category_documents.get(category["key"], set())
+            category["document_count"] = category_document_counts.get(
+                category["key"],
+                0,
             )
-
-        category_assignments = [
-            (sha256, category_key, score)
-            for (sha256, category_key), score in sorted(category_scores.items())
-        ]
 
         if progress:
             progress(5, 6, "Saving adaptive taxonomy…")
@@ -279,6 +228,10 @@ def build_adaptive_taxonomy(
         ]
         details = {
             "embedding_signature": db.embedding_signature(model),
+            "discovery_embedding_signature": db.embedding_signature(model),
+            "discovery_document_count": len(documents),
+            "last_refresh_mode": "full",
+            "last_full_rebuild_at": finished_at,
             "documents_with_vectors": len(documents),
             "assigned_documents": len(assigned_documents),
             "unassigned_documents": max(0, len(documents) - len(assigned_documents)),
@@ -314,6 +267,268 @@ def build_adaptive_taxonomy(
     except Exception as exc:
         db.fail_taxonomy_run(run_id, finished_at=_now(), error=str(exc))
         raise
+
+
+def refresh_adaptive_taxonomy(
+    db,
+    search_config: dict,
+    taxonomy_config: dict,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    """Refresh document assignments and request full discovery only when needed."""
+    model = str(search_config.get("model") or "").strip()
+    latest = db.latest_taxonomy_run()
+    if not model or not latest:
+        return {
+            "mode": "incremental",
+            "needs_rebuild": True,
+            "reason": "taxonomy_missing",
+        }
+    if str(latest["model"] or "") != model:
+        return {
+            "mode": "incremental",
+            "needs_rebuild": True,
+            "reason": "embedding_model_changed",
+        }
+
+    topic_rows = db.list_taxonomy_topics(limit=5000)
+    category_rows = db.list_taxonomy_categories(limit=1000)
+    if not topic_rows or not category_rows:
+        return {
+            "mode": "incremental",
+            "needs_rebuild": True,
+            "reason": "taxonomy_empty",
+        }
+
+    if progress:
+        progress(0, 3, "Refreshing taxonomy assignments…")
+    documents = _document_vectors(db, model)
+    topic_records = [
+        {
+            "key": str(row["topic_key"]),
+            "category_key": str(row["category_key"] or "") or None,
+            "vector": _blob_to_vector(row["centroid"]),
+        }
+        for row in topic_rows
+        if row["centroid"]
+    ]
+    category_records = [
+        {
+            "key": str(row["category_key"]),
+            "vector": _blob_to_vector(row["centroid"]),
+        }
+        for row in category_rows
+        if row["centroid"]
+    ]
+    if not topic_records or not category_records:
+        return {
+            "mode": "incremental",
+            "needs_rebuild": True,
+            "reason": "taxonomy_centroids_missing",
+        }
+
+    assignments = _assign_documents_to_taxonomy(
+        documents,
+        topic_records,
+        category_records,
+        taxonomy_config,
+    )
+    assigned = len(assignments["assigned_documents"])
+    unassigned = max(0, len(documents) - assigned)
+
+    try:
+        details = json.loads(str(latest["details_json"] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        details = {}
+    discovery_count = max(
+        1,
+        int(
+            details.get("discovery_document_count")
+            or latest["document_count"]
+            or len(documents)
+            or 1
+        ),
+    )
+    growth = max(0, len(documents) - discovery_count)
+    min_growth = max(
+        1,
+        int(taxonomy_config.get("full_rebuild_min_growth", 30) or 30),
+    )
+    growth_ratio = max(
+        0.0,
+        float(taxonomy_config.get("full_rebuild_growth_ratio", 0.10) or 0.10),
+    )
+    growth_trigger = max(
+        min_growth,
+        int(math.ceil(discovery_count * growth_ratio)),
+    )
+
+    min_unassigned = max(
+        1,
+        int(taxonomy_config.get("discovery_min_unassigned", 8) or 8),
+    )
+    unassigned_ratio = max(
+        0.0,
+        float(taxonomy_config.get("discovery_unassigned_ratio", 0.03) or 0.03),
+    )
+    unassigned_trigger = max(
+        min_unassigned,
+        int(math.ceil(max(1, len(documents)) * unassigned_ratio)),
+    )
+
+    needs_rebuild = (
+        growth >= growth_trigger
+        or unassigned >= unassigned_trigger
+    )
+    reason = ""
+    if growth >= growth_trigger:
+        reason = "corpus_growth"
+    elif unassigned >= unassigned_trigger:
+        reason = "novel_documents"
+
+    result = {
+        "mode": "incremental",
+        "needs_rebuild": needs_rebuild,
+        "reason": reason,
+        "documents": len(documents),
+        "assigned_documents": assigned,
+        "unassigned_documents": unassigned,
+        "coverage": round(assigned / max(1, len(documents)), 4),
+        "growth_since_discovery": growth,
+        "growth_trigger": growth_trigger,
+        "unassigned_trigger": unassigned_trigger,
+        "topics": len(topic_records),
+        "categories": len(category_records),
+    }
+    if needs_rebuild:
+        if progress:
+            progress(1, 3, "New semantic areas detected; full discovery required")
+        return result
+
+    if progress:
+        progress(1, 3, "Updating existing taxonomy assignments…")
+    refreshed_at = _now()
+    details.update(
+        {
+            "embedding_signature": db.embedding_signature(model),
+            "documents_with_vectors": len(documents),
+            "assigned_documents": assigned,
+            "unassigned_documents": unassigned,
+            "coverage": result["coverage"],
+            "last_refresh_mode": "incremental",
+            "last_incremental_at": refreshed_at,
+            "growth_since_discovery": growth,
+            "growth_trigger": growth_trigger,
+            "unassigned_trigger": unassigned_trigger,
+        }
+    )
+    db.refresh_taxonomy_assignments(
+        run_id=int(latest["id"]),
+        refreshed_at=refreshed_at,
+        document_count=db.document_count(),
+        embedding_count=db.embedding_count(model),
+        category_assignments=assignments["category_assignments"],
+        topic_assignments=assignments["topic_assignments"],
+        category_document_counts=assignments["category_document_counts"],
+        topic_document_counts=assignments["topic_document_counts"],
+        details_json=json.dumps(details, ensure_ascii=False),
+    )
+    if progress:
+        progress(3, 3, "Existing taxonomy updated incrementally")
+    return result
+
+
+def _assign_documents_to_taxonomy(
+    documents: list[dict[str, Any]],
+    topic_records: list[dict[str, Any]],
+    category_records: list[dict[str, Any]],
+    taxonomy_config: dict,
+    *,
+    primary_topic: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    topic_assignments: list[tuple[str, str, float]] = []
+    category_scores: dict[tuple[str, str], float] = {}
+    assigned_documents: set[str] = set()
+    topic_documents: dict[str, set[str]] = defaultdict(set)
+    category_documents: dict[str, set[str]] = defaultdict(set)
+    assignment_threshold = float(
+        taxonomy_config.get("topic_assignment_similarity", 0.68)
+    )
+    max_topics_per_document = max(
+        1,
+        int(taxonomy_config.get("max_topics_per_document", 4) or 4),
+    )
+    topic_lookup = {topic["key"]: topic for topic in topic_records}
+    category_lookup = {
+        category["key"]: category
+        for category in category_records
+    }
+    primary_topic = primary_topic or {}
+
+    for document in documents:
+        sha256 = str(document["id"])
+        scored_topics = sorted(
+            (
+                (_dot(document["vector"], topic["vector"]), topic)
+                for topic in topic_records
+            ),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        selected: list[tuple[float, dict[str, Any]]] = [
+            (score, topic)
+            for score, topic in scored_topics
+            if score >= assignment_threshold
+        ][:max_topics_per_document]
+
+        primary_key = primary_topic.get(sha256)
+        if primary_key and all(
+            topic["key"] != primary_key for _, topic in selected
+        ):
+            primary = topic_lookup.get(primary_key)
+            if primary is not None:
+                selected.append(
+                    (_dot(document["vector"], primary["vector"]), primary)
+                )
+
+        for score, topic in selected:
+            score = max(0.0, float(score))
+            topic_assignments.append((sha256, topic["key"], score))
+            topic_documents[topic["key"]].add(sha256)
+            assigned_documents.add(sha256)
+
+            category_key = topic.get("category_key")
+            category = category_lookup.get(category_key)
+            if category_key and category is not None:
+                category_score = max(
+                    0.0,
+                    _dot(document["vector"], category["vector"]),
+                )
+                key = (sha256, category_key)
+                category_scores[key] = max(
+                    category_scores.get(key, 0.0),
+                    category_score,
+                )
+                category_documents[category_key].add(sha256)
+
+    category_assignments = [
+        (sha256, category_key, score)
+        for (sha256, category_key), score in sorted(category_scores.items())
+    ]
+    return {
+        "topic_assignments": topic_assignments,
+        "category_assignments": category_assignments,
+        "assigned_documents": assigned_documents,
+        "topic_document_counts": {
+            key: len(values) for key, values in topic_documents.items()
+        },
+        "category_document_counts": {
+            key: len(values) for key, values in category_documents.items()
+        },
+        "assignment_threshold": assignment_threshold,
+        "max_topics_per_document": max_topics_per_document,
+    }
 
 
 def _document_vectors(db, model: str) -> list[dict[str, Any]]:
