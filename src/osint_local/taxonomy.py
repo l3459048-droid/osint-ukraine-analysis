@@ -115,11 +115,13 @@ def build_adaptive_taxonomy(
 
         if progress:
             progress(2, 6, "Naming discovered topics…")
+        previous_topics = db.list_taxonomy_topics(limit=5000)
         topic_records = _materialize_topics(
             topic_clusters,
             documents,
             taxonomy_config,
             qa_config,
+            previous=previous_topics,
             labeler=labeler,
         )
 
@@ -145,11 +147,13 @@ def build_adaptive_taxonomy(
             max_clusters=max_categories,
             weighted=True,
         )
+        previous_categories = db.list_taxonomy_categories(limit=1000)
         category_records = _materialize_categories(
             raw_categories,
             topic_records,
             taxonomy_config,
             qa_config,
+            previous=previous_categories,
             labeler=labeler,
         )
 
@@ -372,6 +376,7 @@ def _materialize_topics(
     taxonomy_config: dict,
     qa_config: dict,
     *,
+    previous=(),
     labeler=None,
 ) -> list[dict[str, Any]]:
     document_by_id = {str(item["id"]): item for item in documents}
@@ -407,6 +412,13 @@ def _materialize_topics(
             }
         )
 
+    _reuse_previous_labels(
+        candidates,
+        previous,
+        threshold=float(
+            taxonomy_config.get("topic_label_reuse_similarity", 0.88)
+        ),
+    )
     labels = _labels(
         "topic",
         candidates,
@@ -424,6 +436,7 @@ def _materialize_categories(
     taxonomy_config: dict,
     qa_config: dict,
     *,
+    previous=(),
     labeler=None,
 ) -> list[dict[str, Any]]:
     topic_by_key = {topic["key"]: topic for topic in topics}
@@ -457,6 +470,13 @@ def _materialize_categories(
             }
         )
 
+    _reuse_previous_labels(
+        candidates,
+        previous,
+        threshold=float(
+            taxonomy_config.get("category_label_reuse_similarity", 0.82)
+        ),
+    )
     labels = _labels(
         "category",
         candidates,
@@ -476,17 +496,21 @@ def _labels(
     *,
     labeler=None,
 ) -> dict[str, dict[str, str]]:
-    if not candidates:
+    pending = [
+        item for item in candidates
+        if not bool(item.get("label_locked"))
+    ]
+    if not pending:
         return {}
     if labeler is not None:
         try:
-            return labeler(kind, candidates) or {}
+            return labeler(kind, pending) or {}
         except Exception:
             return {}
     if not bool(taxonomy_config.get("label_with_ollama", True)):
         return {}
     try:
-        return _ollama_labels(kind, candidates, taxonomy_config, qa_config)
+        return _ollama_labels(kind, pending, taxonomy_config, qa_config)
     except Exception:
         return {}
 
@@ -515,7 +539,10 @@ def _ollama_labels(
                 "id": item["key"],
                 "keywords": item["keywords"][:8],
                 "representatives": item.get("representatives", [])[:4],
-                "snippets": item.get("snippets", [])[:3],
+                "snippets": [
+                    str(value)[:350]
+                    for value in item.get("snippets", [])[:2]
+                ],
                 "documents": item.get("document_count", 0),
             }
             for item in batch
@@ -561,6 +588,56 @@ def _parse_json_array(value: str) -> list[dict[str, Any]]:
     except json.JSONDecodeError:
         return []
     return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
+def _reuse_previous_labels(
+    candidates: list[dict[str, Any]],
+    previous,
+    *,
+    threshold: float,
+) -> None:
+    previous_items = []
+    for row in previous or []:
+        blob = row["centroid"]
+        if not blob:
+            continue
+        vector = _blob_to_vector(blob)
+        if not vector:
+            continue
+        previous_items.append(
+            {
+                "name": str(row["name"] or ""),
+                "description": str(row["description"] or ""),
+                "vector": vector,
+            }
+        )
+
+    used_previous: set[int] = set()
+    for candidate in sorted(
+        candidates,
+        key=lambda item: int(item.get("document_count") or 0),
+        reverse=True,
+    ):
+        best_index = -1
+        best_score = float(threshold)
+        for index, old in enumerate(previous_items):
+            if index in used_previous:
+                continue
+            score = _dot(candidate["vector"], old["vector"])
+            if score >= best_score:
+                best_score = score
+                best_index = index
+        if best_index < 0:
+            continue
+        old = previous_items[best_index]
+        if old["name"]:
+            candidate["name"] = old["name"]
+            candidate["description"] = (
+                old["description"] or candidate["description"]
+            )
+            candidate["label_locked"] = True
+            candidate["label_reuse_score"] = round(best_score, 4)
+            used_previous.add(best_index)
 
 
 def _apply_labels(
