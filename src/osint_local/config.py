@@ -139,6 +139,8 @@ DEFAULT_CONFIG = {
         "min_topic_documents": 2,
         "topic_similarity": 0.64,
         "topic_merge_similarity": 0.82,
+        "topic_assignment_similarity": 0.68,
+        "max_topics_per_document": 4,
         "category_similarity": 0.48,
         "category_merge_similarity": 0.70,
         "topic_label_reuse_similarity": 0.88,
