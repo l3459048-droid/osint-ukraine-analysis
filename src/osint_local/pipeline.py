@@ -104,6 +104,23 @@ class LocalPipeline:
                 {key: value for key, value in page.items() if key != "text"}
                 for page in extracted.pages
             ]
+            layout_path = None
+            if extracted.layout:
+                layout_path = self.settings.layout_dir / f"{sha256}.json"
+                self._atomic_write_text(
+                    layout_path,
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "document_sha256": sha256,
+                            "source_path": source_path,
+                            "pages": extracted.layout,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                )
+
             metadata = {
                 "document_id": sha256,
                 "source_path": source_path,
@@ -114,6 +131,8 @@ class LocalPipeline:
                 "extraction_method": extracted.method,
                 "text_chars": len(extracted.text),
                 "language": language,
+                "layout_path": str(layout_path) if layout_path is not None else None,
+                "layout_version": 1 if layout_path is not None else None,
                 "pages": page_metadata,
                 "chunks": len(chunks),
                 "classifications": [
@@ -169,6 +188,7 @@ class LocalPipeline:
             self.settings.workspace_dir,
             self.settings.text_dir,
             self.settings.metadata_dir,
+            self.settings.layout_dir,
             self.settings.logs_dir,
         ):
             p.mkdir(parents=True, exist_ok=True)
