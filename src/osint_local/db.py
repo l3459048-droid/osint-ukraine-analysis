@@ -478,6 +478,32 @@ class Database:
             )
             params.append(domain)
 
+        taxonomy_category = str(
+            filters.get("taxonomy_category") or ""
+        ).strip()
+        if taxonomy_category:
+            conditions.append(
+                f"""EXISTS (
+                    SELECT 1 FROM document_taxonomy_categories dtc
+                    WHERE dtc.document_sha256={alias}.sha256
+                      AND dtc.category_key=?
+                )"""
+            )
+            params.append(taxonomy_category)
+
+        taxonomy_topic = str(
+            filters.get("taxonomy_topic") or ""
+        ).strip()
+        if taxonomy_topic:
+            conditions.append(
+                f"""EXISTS (
+                    SELECT 1 FROM document_taxonomy_topics dtt
+                    WHERE dtt.document_sha256={alias}.sha256
+                      AND dtt.topic_key=?
+                )"""
+            )
+            params.append(taxonomy_topic)
+
         prefix = str(filters.get("source_prefix") or "").strip().replace("\\", "/").strip("/")
         if prefix:
             conditions.append(
