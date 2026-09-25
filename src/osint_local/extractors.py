@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 @dataclass
@@ -11,6 +11,7 @@ class ExtractionResult:
     text: str
     method: str
     pages: list[dict]
+    layout: list[dict] = field(default_factory=list)
 
 
 def extract(path: Path, ocr_config: dict) -> ExtractionResult:
@@ -191,6 +192,95 @@ def _layout_pdf_page_text(page) -> tuple[str, dict]:
     }
 
 
+def _pdf_layout_artifact(page, page_number: int) -> dict:
+    """Capture stable geometry/style data for later layout-preserving rendering."""
+    try:
+        import fitz
+
+        flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES
+        data = page.get_text("dict", sort=True, flags=flags)
+    except (AttributeError, TypeError):
+        try:
+            data = page.get_text("dict", sort=True)
+        except (AttributeError, TypeError):
+            data = {"blocks": []}
+
+    blocks: list[dict] = []
+    text_blocks = [
+        block for block in data.get("blocks", [])
+        if int(block.get("type", 0)) == 0
+    ]
+    text_blocks.sort(
+        key=lambda block: (
+            float((block.get("bbox") or (0, 0, 0, 0))[1]),
+            float((block.get("bbox") or (0, 0, 0, 0))[0]),
+        )
+    )
+
+    for block_index, block in enumerate(text_blocks, 1):
+        block_id = f"p{page_number:04d}-b{block_index:04d}"
+        block_bbox = [round(float(v), 3) for v in (block.get("bbox") or (0, 0, 0, 0))[:4]]
+        artifact_lines: list[dict] = []
+
+        raw_lines = list(block.get("lines", []))
+        raw_lines.sort(
+            key=lambda line: (
+                float((line.get("bbox") or (0, 0, 0, 0))[1]),
+                float((line.get("bbox") or (0, 0, 0, 0))[0]),
+            )
+        )
+        for line_index, line in enumerate(raw_lines, 1):
+            line_id = f"{block_id}-l{line_index:04d}"
+            line_bbox = [round(float(v), 3) for v in (line.get("bbox") or (0, 0, 0, 0))[:4]]
+            spans: list[dict] = []
+            for span_index, span in enumerate(line.get("spans", []), 1):
+                text = _normalize_pdf_text(str(span.get("text") or ""))
+                if not text:
+                    continue
+                bbox = [round(float(v), 3) for v in (span.get("bbox") or (0, 0, 0, 0))[:4]]
+                origin = span.get("origin") or ()
+                spans.append({
+                    "id": f"{line_id}-s{span_index:04d}",
+                    "bbox": bbox,
+                    "origin": [round(float(v), 3) for v in origin[:2]] if len(origin) >= 2 else None,
+                    "text": text,
+                    "font": str(span.get("font") or ""),
+                    "size": round(float(span.get("size") or 0.0), 3),
+                    "flags": int(span.get("flags") or 0),
+                    "color": int(span.get("color") or 0),
+                    "ascender": round(float(span.get("ascender") or 0.0), 4),
+                    "descender": round(float(span.get("descender") or 0.0), 4),
+                })
+            line_text = _normalize_pdf_text("".join(span["text"] for span in spans))
+            if spans:
+                artifact_lines.append({
+                    "id": line_id,
+                    "bbox": line_bbox,
+                    "text": line_text,
+                    "wmode": int(line.get("wmode") or 0),
+                    "dir": [round(float(v), 4) for v in (line.get("dir") or (1.0, 0.0))[:2]],
+                    "spans": spans,
+                })
+
+        if artifact_lines:
+            blocks.append({
+                "id": block_id,
+                "bbox": block_bbox,
+                "lines": artifact_lines,
+            })
+
+    rect = getattr(page, "rect", None)
+    width = float(getattr(rect, "width", 0.0) or 0.0)
+    height = float(getattr(rect, "height", 0.0) or 0.0)
+    return {
+        "page": page_number,
+        "width": round(width, 3),
+        "height": round(height, 3),
+        "rotation": int(getattr(page, "rotation", 0) or 0),
+        "blocks": blocks,
+    }
+
+
 def _prefer_layout_text(native_text: str, layout_text: str) -> bool:
     native_visible = len(re.sub(r"\s+", "", str(native_text or "")))
     layout_visible = len(re.sub(r"\s+", "", str(layout_text or "")))
@@ -248,6 +338,7 @@ def _extract_pdf(path: Path, ocr_config: dict) -> ExtractionResult:
 
     doc = fitz.open(path)
     pages: list[dict] = []
+    layout_pages: list[dict] = []
     all_text: list[str] = []
     ocr_used = False
     min_chars = int(ocr_config.get("min_text_chars_per_page", 80))
@@ -259,6 +350,8 @@ def _extract_pdf(path: Path, ocr_config: dict) -> ExtractionResult:
         for index, page in enumerate(doc):
             native_text = _native_pdf_page_text(page)
             native_metrics = _pdf_text_quality(native_text, min_chars=min_chars)
+            layout_artifact = _pdf_layout_artifact(page, index + 1)
+            layout_pages.append(layout_artifact)
             layout_text, layout_meta = _layout_pdf_page_text(page)
             layout_metrics = _pdf_text_quality(layout_text, min_chars=min_chars)
             layout_used = _prefer_layout_text(native_text, layout_text)
@@ -321,6 +414,7 @@ def _extract_pdf(path: Path, ocr_config: dict) -> ExtractionResult:
             else "pdf-text"
         ),
         pages=pages,
+        layout=layout_pages,
     )
 
 
