@@ -2392,3 +2392,222 @@ def test_translation_quality_score_rejects_untranslated_english_for_ru():
         untranslated,
         target_lang="ru",
     ) >= 4
+
+
+
+def test_translation_literals_are_hard_preserved():
+    from osint_local.translation_literals import (
+        missing_protected_literals,
+        protect_literals,
+        translate_preserving_literals,
+    )
+
+    source = (
+        "Освітня програма J3 вводиться в дію з 01.09.2026 р. "
+        "Обсяг 240 кредитів ЄКТС. http://idgu.edu.ua/ects"
+    )
+    protection = protect_literals(source)
+
+    assert "01.09.2026" not in protection.masked_text
+    assert "J3" not in protection.masked_text
+    assert "240" not in protection.masked_text
+    assert "http://idgu.edu.ua/ects" not in protection.masked_text
+
+    def mutating_model(value: str) -> str:
+        # Deliberately destroys placeholders. The segmented fallback must still
+        # splice exact source literals back into the result.
+        return value.replace("ZXQLIT", "BROKEN").replace("Освітня", "Образовательная")
+
+    translated, intact = translate_preserving_literals(source, mutating_model)
+    assert intact is False
+    assert missing_protected_literals(source, translated) == ()
+    assert "01.09.2026" in translated
+    assert "J3" in translated
+    assert "240" in translated
+    assert "http://idgu.edu.ua/ects" in translated
+
+
+def test_translation_quality_treats_missing_literal_as_hard_failure():
+    import osint_local.fast_translation as fast
+
+    source = "Освітня програма вводиться в дію з 01.09.2026 р. Спеціальність J3."
+    bad = "Образовательная программа вводится в действие. Специальность."
+
+    assert fast._translation_quality_score(source, bad, target_lang="ru") >= 10
+
+
+def test_quality_translation_uses_m2m100_language_prefixes():
+    from types import SimpleNamespace
+
+    import osint_local.quality_translation as quality
+
+    seen = {}
+
+    class FakeSentencePiece:
+        def encode(self, text, out_type=str):
+            return ["▁" + token for token in text.split()]
+
+        def decode(self, pieces):
+            return " ".join(piece.lstrip("▁") for piece in pieces)
+
+    class FakeTranslator:
+        def translate_batch(self, source, **kwargs):
+            seen["source"] = source
+            seen["target_prefix"] = kwargs.get("target_prefix")
+            seen["beam_size"] = kwargs.get("beam_size")
+            return [SimpleNamespace(hypotheses=[["__ru__", "▁Привет", "▁мир"]])]
+
+    engine = object.__new__(quality.QualityTranslator)
+    engine.source_lang = "uk"
+    engine.target_lang = "ru"
+    engine.max_input_tokens = 480
+    engine.segment_tokens = 240
+    engine.batch_tokens = 1024
+    engine.sp = FakeSentencePiece()
+    engine.translator = FakeTranslator()
+
+    output = engine._translate_raw("Привіт світ")
+
+    assert output == "Привет мир"
+    assert seen["source"][0][0] == "__uk__"
+    assert seen["target_prefix"] == [["__ru__"]]
+    assert seen["beam_size"] == 5
+
+
+def test_quality_fallback_router_prefers_prepared_m2m100(tmp_path: Path, monkeypatch):
+    import osint_local.translation as translation
+
+    settings = load_settings(make_config(tmp_path))
+    monkeypatch.setattr(translation, "quality_translation_available", lambda: True)
+    monkeypatch.setattr(translation, "quality_model_ready", lambda _settings: True)
+    monkeypatch.setattr(translation, "argos_available", lambda: False)
+
+    class FakeQuality:
+        literal_segment_fallbacks = 0
+
+        def __init__(self, settings, source_lang, target_lang):
+            pass
+
+        def translate_text(self, value):
+            return "Образовательная программа вводится в действие с 01.09.2026 г."
+
+    monkeypatch.setattr(translation, "QualityTranslator", FakeQuality)
+
+    router = translation._QualityFallbackRouter(
+        settings,
+        "uk",
+        "ru",
+        allow_model_install=False,
+    )
+    output = router("Освітня програма вводиться в дію з 01.09.2026 р.")
+    router.record_selected()
+
+    assert "01.09.2026" in output
+    assert router.last_engine == "m2m100-418m-int8"
+    assert router.metadata()["quality_selected"] == 1
+
+
+def test_pipeline_persists_pdf_layout_artifact(tmp_path: Path):
+    import fitz
+
+    config_path = make_config(tmp_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["allowed_extensions"] = [".pdf"]
+    config["ocr"] = {"enabled": False}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    settings = load_settings(config_path)
+    settings.input_dir.mkdir(parents=True)
+    pdf_path = settings.input_dir / "layout.pdf"
+
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((50, 100), "Field:")
+    page.insert_text((280, 100), "Value")
+    doc.save(pdf_path)
+    doc.close()
+
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(pdf_path)
+        assert processed.status == "processed"
+        layout_path = settings.layout_dir / f"{processed.sha256}.json"
+        assert layout_path.is_file()
+
+        artifact = json.loads(layout_path.read_text(encoding="utf-8"))
+        assert artifact["version"] == 1
+        assert artifact["document_sha256"] == processed.sha256
+        assert artifact["pages"][0]["width"] == 600.0
+        blocks = artifact["pages"][0]["blocks"]
+        assert blocks
+        assert blocks[0]["id"].startswith("p0001-b")
+        line = blocks[0]["lines"][0]
+        assert line["id"].startswith("p0001-b")
+        assert line["spans"][0]["font"]
+        assert len(line["spans"][0]["bbox"]) == 4
+    finally:
+        pipeline.close()
+
+
+def test_web_can_prepare_quality_translation_model(tmp_path: Path, monkeypatch):
+    import re
+    import time
+    import urllib.parse
+    import urllib.request
+
+    import osint_local.web as web
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+
+    def fake_prepare(settings, *, progress=None, run_benchmark=True):
+        if progress:
+            progress(0, 0, "Preparing fake Quality model…")
+        return {
+            "ready": True,
+            "model": "facebook/m2m100_418M",
+            "benchmark": {"quality": {"mean_reference_similarity": 0.9}},
+        }
+
+    try:
+        monkeypatch.setattr(web, "quality_translation_available", lambda: True)
+        monkeypatch.setattr(web, "prepare_quality_model", fake_prepare)
+        server = web.create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/system", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+        req = urllib.request.Request(
+            base + "/actions/prepare-quality-translation",
+            data=urllib.parse.urlencode({"csrf": csrf}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 202
+        assert payload["action"]["kind"] == "quality-translation-setup"
+
+        deadline = time.time() + 2
+        state = server.quality_setup.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = server.quality_setup.snapshot()
+
+        assert state["status"] == "succeeded"
+        assert state["result"]["model"] == "facebook/m2m100_418M"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
