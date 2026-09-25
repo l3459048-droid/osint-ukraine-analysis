@@ -944,13 +944,27 @@ def load_fast_benchmark(settings, source_lang: str, target_lang: str = "ru") -> 
 
 def _looks_like_layout_field(line: str) -> bool:
     value = str(line or "").strip()
+    words = re.findall(r"[^\W_]+", value, flags=re.UNICODE)
+    letters = [char for char in value if char.isalpha()]
+    uppercase_ratio = (
+        sum(char.isupper() for char in letters) / len(letters)
+        if letters
+        else 0.0
+    )
+    short_label = (
+        len(value) <= 70
+        and len(words) <= 3
+        and not re.search(r"[.!?…,:;—-]\s*$", value)
+    )
+    heading = len(value) <= 160 and len(letters) >= 4 and uppercase_ratio >= 0.75
     return (
         bool(TECHNICAL_FILL_RE.search(value))
         or "№" in value
         or bool(URL_RE.search(value))
         or bool(re.match(r"^\d{1,3}[.)]\s+", value))
         or (":" in value[:80] and len(value) <= 180)
-        or (len(value) <= 70 and not re.search(r"[.!?…,:;—-]\s*$", value))
+        or short_label
+        or heading
     )
 
 
