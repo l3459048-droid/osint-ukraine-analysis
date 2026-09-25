@@ -240,7 +240,10 @@ class QualityTranslator:
         from .fast_translation import _clean_translation_unit, _semantic_units
 
         source_prefix = f"__{self.source_lang}__"
-        content_limit = max(1, self.max_input_tokens - 1)
+        # Transformers-converted M2M100 expects the same special-token shape
+        # as M2M100Tokenizer: [src_lang] X [eos]. Neither token is implicitly
+        # added by CTranslate2 for Transformers models.
+        content_limit = max(1, self.max_input_tokens - 2)
         sentence_limit = min(content_limit, self.segment_tokens)
         windows: list[list[str]] = []
 
@@ -257,7 +260,7 @@ class QualityTranslator:
             for start in range(0, len(tokens), sentence_limit):
                 window = tokens[start:start + sentence_limit]
                 if window:
-                    windows.append([source_prefix] + window)
+                    windows.append([source_prefix] + window + ["</s>"])
         return windows
 
     def _translate_raw(self, text: str) -> str:
