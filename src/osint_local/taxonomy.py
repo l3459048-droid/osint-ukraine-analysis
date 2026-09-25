@@ -23,7 +23,7 @@ STOPWORDS = {
     "сторінка", "розділ", "інформація", "який", "яка", "які", "цей", "цієї", "та",
 }
 
-TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ][\\w'’-]{2,}", re.UNICODE)
+TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ][\w'’-]{2,}", re.UNICODE)
 
 
 def taxonomy_available(db, search_config: dict) -> bool:
@@ -602,7 +602,7 @@ def _fallback_description(kind: str, document_count: int, keywords: Sequence[str
 
 
 def _clean_label(value: Any, limit: int) -> str:
-    text = re.sub(r"\\s+", " ", str(value or "")).strip(" -–—:;")
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" -–—:;")
     return text[:limit].strip()
 
 
