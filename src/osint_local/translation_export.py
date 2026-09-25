@@ -430,6 +430,28 @@ def _plan_layout_text(
     encoding = getattr(fitz, "TEXT_ENCODING_CYRILLIC", 2)
     align = _infer_alignment(page, rect)
 
+    # PyMuPDF can wrap an over-wide single word by characters. Pre-shrink
+    # against actual font metrics so Russian words stay intact when possible.
+    try:
+        measure_font = (
+            fitz.Font(fontfile=str(fontfile))
+            if fontfile is not None
+            else fitz.Font(fontname=fontname)
+        )
+        words = re.findall(r"\S+", text)
+        widest = max(
+            (measure_font.text_length(word, fontsize=start_size) for word in words),
+            default=0.0,
+        )
+        available_width = max(1.0, float(rect.width) - 1.0)
+        if widest > available_width:
+            start_size = max(
+                min_size,
+                start_size * (available_width / widest) * 0.97,
+            )
+    except Exception:
+        pass
+
     size = start_size
     while size >= min_size - 0.01:
         shape = page.new_shape()
