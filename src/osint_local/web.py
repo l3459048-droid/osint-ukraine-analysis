@@ -919,9 +919,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _taxonomy_page(self, query: dict[str, list[str]]) -> None:
         category_key = _first(query, "category").strip()
         topic_key = _first(query, "topic").strip()
+        view = _first(query, "view").strip().casefold()
+        show_unassigned = view == "unassigned"
+
+        selected_category_row = (
+            self.db.get_taxonomy_category(category_key)
+            if category_key else None
+        )
+        selected_topic_row = (
+            self.db.get_taxonomy_topic(topic_key)
+            if topic_key else None
+        )
+
+        # When a topic is selected, keep the surrounding category context visible.
+        if selected_topic_row and not category_key:
+            category_key = str(selected_topic_row["category_key"] or "")
+            selected_category_row = (
+                self.db.get_taxonomy_category(category_key)
+                if category_key else None
+            )
 
         categories = self.db.list_taxonomy_categories(limit=200)
-        if category_key:
+        if category_key and not show_unassigned:
             topics = self.db.list_taxonomy_topics(
                 category_key=category_key,
                 limit=500,
@@ -930,7 +949,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             topics = self.db.list_taxonomy_topics(limit=500)
 
         documents = []
-        if topic_key:
+        if show_unassigned:
+            documents = self.db.taxonomy_unassigned_documents(limit=300)
+        elif topic_key:
             documents = self.db.taxonomy_documents(
                 topic_key=topic_key,
                 limit=300,
@@ -958,6 +979,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 action=self.server.actions.snapshot(),
                 selected_category=category_key,
                 selected_topic=topic_key,
+                selected_category_row=selected_category_row,
+                selected_topic_row=selected_topic_row,
+                show_unassigned=show_unassigned,
             ),
         ]
         self._html("Corpus", "".join(body))
