@@ -332,29 +332,34 @@ def translate_document(
                 "pip install -e '.[fasttranslate]'"
             )
 
-        if translated is None and selected_engine == "quality":
-            if not quality_translation_available() or not quality_model_ready(settings):
+        if translated is None and selected_engine in {"auto", "quality"}:
+            quality_ready = (
+                quality_translation_available()
+                and quality_model_ready(settings)
+            )
+            if quality_ready:
+                if progress:
+                    progress(0, len(sections), f"Using Quality Translation · M2M100 418M INT8 · {src}→{dst}")
+                quality_engine = QualityTranslator(settings, src, dst)
+                translated = _translate_sections_legacy(
+                    sections,
+                    src,
+                    dst,
+                    lambda value, _a, _b: quality_engine.translate_text(value),
+                    int(settings.translation.get("quality_max_chars_per_request", 2400)),
+                    progress=progress,
+                    should_pause=should_pause,
+                )
+                engine_name = "m2m100-418m-int8"
+                engine_meta = {
+                    "model": QUALITY_MODEL_ID,
+                    "compute_type": quality_engine.compute_type,
+                    "literal_segment_fallbacks": quality_engine.literal_segment_fallbacks,
+                }
+            elif selected_engine == "quality":
                 raise RuntimeError(
                     "Quality Translation model is not prepared. Prepare M2M100 in System first."
                 )
-            if progress:
-                progress(0, len(sections), f"Using Quality Translation · M2M100 418M INT8 · {src}→{dst}")
-            quality_engine = QualityTranslator(settings, src, dst)
-            translated = _translate_sections_legacy(
-                sections,
-                src,
-                dst,
-                lambda value, _a, _b: quality_engine.translate_text(value),
-                int(settings.translation.get("quality_max_chars_per_request", 2400)),
-                progress=progress,
-                should_pause=should_pause,
-            )
-            engine_name = "m2m100-418m-int8"
-            engine_meta = {
-                "model": QUALITY_MODEL_ID,
-                "compute_type": quality_engine.compute_type,
-                "literal_segment_fallbacks": quality_engine.literal_segment_fallbacks,
-            }
 
         if translated is None:
             if progress:
