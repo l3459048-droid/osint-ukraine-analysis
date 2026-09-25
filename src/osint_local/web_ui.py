@@ -281,6 +281,7 @@ def _translation_panel(
     available: bool,
     pairs: set[tuple[str, str]],
     quality_ready: bool,
+    source_extension: str = "",
     action: dict,
 ) -> str:
     running_here = (
@@ -308,11 +309,17 @@ def _translation_panel(
     for row in translations:
         if row["target_lang"] != "ru":
             continue
+        pdf_link = (
+            f'<a class="translation-export" href="/translation-export/{_e(sha256)}/{_e(row["source_lang"])}/ru/pdf-layout" download>PDF · layout</a>'
+            if str(source_extension or "").casefold() == ".pdf"
+            else ""
+        )
         rows.append(
             f'<div class="translation-entry">'
             f'<a class="translation-item" href="/translation/{_e(sha256)}/{_e(row["source_lang"])}/ru" target="_blank">'
             f'<span>{_e(row["source_lang"])} → ru</span><small>{_e((row["created_at"] or "")[:19])} · {_e(row["engine"] or "unknown")}</small></a>'
             f'<a class="translation-export" href="/translation-export/{_e(sha256)}/{_e(row["source_lang"])}/ru/docx" download>DOCX</a>'
+            f'{pdf_link}'
             f'</div>'
         )
     saved = "".join(rows) if rows else '<span class="translation-empty">No Russian translation saved yet.</span>'
@@ -327,7 +334,7 @@ def _translation_panel(
 <label>Engine<select name="engine">{engine_options}</select></label>
 <button type="submit"{disabled}>Translate</button>
 </form>
-<div class="ask-filter-note">For important documents choose Quality. Auto keeps OPUS fast and invokes Quality only when the quality gate detects a problem. Protected dates, numbers, URLs and neutral codes remain exact.</div>
+<div class="ask-filter-note">For important documents choose Quality. Auto keeps OPUS fast and invokes Quality only when the quality gate detects a problem. Protected dates, numbers, URLs and neutral codes remain exact. For PDFs, a Quality re-translation also creates the block map required by PDF · layout export.</div>
 <div class="translation-status">{_e(status)}</div>
 <div class="translation-list">{saved}</div>
 </section>"""
