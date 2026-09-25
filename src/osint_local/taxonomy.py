@@ -36,10 +36,16 @@ def taxonomy_is_stale(db, search_config: dict) -> bool:
     latest = db.latest_taxonomy_run()
     if not latest:
         return True
+    try:
+        details = json.loads(str(latest["details_json"] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        details = {}
     return (
         str(latest["model"] or "") != model
         or int(latest["document_count"] or 0) != db.document_count()
         or int(latest["embedding_count"] or 0) != db.embedding_count(model)
+        or str(details.get("embedding_signature") or "")
+            != db.embedding_signature(model)
     )
 
 
@@ -216,6 +222,7 @@ def build_adaptive_taxonomy(
             for item in topic_records
         ]
         details = {
+            "embedding_signature": db.embedding_signature(model),
             "documents_with_vectors": len(documents),
             "assigned_documents": len(assigned_documents),
             "unassigned_documents": max(0, len(documents) - len(assigned_documents)),
