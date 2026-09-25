@@ -147,5 +147,21 @@
   },
   "ui": {
     "setup_complete": true
+  },
+  "taxonomy": {
+    "enabled": true,
+    "auto_rebuild": true,
+    "min_documents": 8,
+    "min_topic_documents": 2,
+    "topic_similarity": 0.64,
+    "topic_merge_similarity": 0.82,
+    "category_similarity": 0.48,
+    "category_merge_similarity": 0.7,
+    "max_topics": 80,
+    "max_categories": 24,
+    "label_with_ollama": true,
+    "label_language": "en",
+    "label_batch_size": 8,
+    "max_llm_labels": 60
   }
 }
