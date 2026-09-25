@@ -142,6 +142,7 @@ def prepare_quality_model(
                 converter = ctranslate2.converters.TransformersConverter(
                     QUALITY_MODEL_ID,
                     copy_files=list(QUALITY_TOKENIZER_FILES),
+                    low_cpu_mem_usage=True,
                 )
                 converter.convert(
                     str(temp_dir),
