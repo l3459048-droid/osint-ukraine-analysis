@@ -41,8 +41,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install full application
-        run: python -m pip install -e ".[all]"
+        run: python -m pip install -e ".[all,dev]"
       - name: Validate dependency graph
         run: python -m pip check
       - name: Import Fast Translation stack
         run: python -c "import ctranslate2, sentencepiece, transformers, sentence_transformers, argostranslate; print(ctranslate2.__version__, transformers.__version__, sentence_transformers.__version__)"
+      - name: Run test suite on Windows
+        run: pytest -q
