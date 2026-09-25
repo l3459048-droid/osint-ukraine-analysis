@@ -168,8 +168,10 @@ def _system_panel(status: dict, csrf_token: str) -> str:
     fast_available = bool(queue.get("fast_available"))
     benchmarks = queue.get("fast_benchmarks") or {}
     action = status.get("action") or {}
+    translation = status.get("translation") or {}
     fast_setup = status.get("fast_setup") or {}
-    action_message = action.get("error") or action.get("message") or "Ready"
+    current_activity = translation if translation.get("status") in {"running", "failed"} else action
+    action_message = current_activity.get("error") or current_activity.get("message") or "Ready"
     fast_message = fast_setup.get("error") or fast_setup.get("message") or ""
     semantic = "Ready" if status.get("semantic_available") else "Not installed"
     ollama = "Ready" if status.get("ollama_reachable") else "Unavailable"
@@ -218,7 +220,7 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 <div class="panel-head"><div><h2>Processing</h2><span class="panel-subtle">{_e(status.get("performance_label") or status.get("performance_profile") or "Economy")}</span></div>
 <form action="/actions/maintenance" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit">Process now</button></form></div>
 <div class="system-grid">
-<div><span>Current activity</span><strong>{_e(action_message)}</strong><small>{_e(action.get("kind") or "idle")} · {_e(action.get("status") or "idle")}</small></div>
+<div><span>Current activity</span><strong>{_e(action_message)}</strong><small>{_e(current_activity.get("kind") or "idle")} · {_e(current_activity.get("status") or "idle")}</small></div>
 <div><span>Semantic search</span><strong>{_e(semantic)}</strong><small>{status.get("embedding_count", 0)}/{status.get("chunks", 0)} chunks embedded</small></div>
 <div><span>Translation</span><strong>{queue.get("translated", 0)} translated · {queue.get("pending", 0)} pending</strong><small>{_e(pair_text)}{f' · {queue.get("blocked", 0)} blocked' if queue.get("blocked") else ""}</small></div>
 <div><span>Ollama</span><strong>{_e(ollama)}</strong><small>{_e(model_text)}</small></div>
@@ -235,7 +237,11 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 </section>"""
 
 def _translation_panel(csrf_token: str, sha256: str, translations, *, available: bool, pairs: set[tuple[str, str]], action: dict) -> str:
-    running_here = action.get("status") == "running" and action.get("kind") == "translate"
+    running_here = (
+        action.get("status") == "running"
+        and action.get("kind") == "translate"
+        and action.get("sha256") == sha256
+    )
     useful_pairs = sorted(pair for pair in pairs if pair in {("en", "ru"), ("uk", "ru")})
     pair_note = ", ".join(f"{a}→ru" for a, _ in useful_pairs) if useful_pairs else "EN→RU / UK→RU models not installed yet"
     disabled = " disabled" if running_here else ""
@@ -588,22 +594,30 @@ UI_SCRIPT = r"""
   if (translationPanel) {
     const form = translationPanel.querySelector('.translation-form');
     const status = translationPanel.querySelector('.translation-status');
+    const submitButton = form ? form.querySelector('button[type="submit"]') : null;
+    const documentSha = form ? (form.querySelector('input[name="sha256"]')?.value || '') : '';
     let translationWasRunning = false;
     async function pollTranslation() {
       try {
         const response = await fetch('/api/activity', {cache: 'no-store'});
         if (response.ok) {
           const data = await response.json();
-          const state = data.action || {};
-          const running = state.kind === 'translate' && state.status === 'running';
+          const state = data.translation || data.action || {};
+          const sameDocument = !state.sha256 || state.sha256 === documentSha;
+          const running = sameDocument && state.kind === 'translate' && state.status === 'running';
           if (running) {
             let message = state.message || 'Translating…';
             if (state.total) message += ` · ${state.current}/${state.total}`;
             status.textContent = message;
-          } else if (translationWasRunning && state.kind === 'translate') {
+          } else if (translationWasRunning && sameDocument && state.kind === 'translate') {
             status.textContent = state.error || state.message || 'Translation complete';
-            if (state.status === 'succeeded') setTimeout(() => location.reload(), 500);
+            if (state.status === 'succeeded') {
+              setTimeout(() => location.reload(), 500);
+            } else if (submitButton) {
+              submitButton.disabled = false;
+            }
           }
+          if (submitButton && !running && !translationWasRunning) submitButton.disabled = false;
           translationWasRunning = running;
         }
       } catch (_) {}
@@ -621,7 +635,8 @@ UI_SCRIPT = r"""
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Translation failed');
         translationWasRunning = true;
-        status.textContent = (data.action && data.action.message) || 'Starting…';
+        const state = data.translation || data.action || {};
+        status.textContent = state.message || 'Starting…';
       } catch (error) {
         status.textContent = error.message || 'Translation failed';
         if (button) button.disabled = false;
