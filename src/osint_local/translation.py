@@ -216,6 +216,158 @@ class _QualityFallbackRouter:
         }
 
 
+def _load_pdf_layout_for_translation(settings, doc, sha256: str) -> dict | None:
+    if str(doc["extension"] or "").casefold() != ".pdf":
+        return None
+
+    try:
+        metadata = json.loads(str(doc["metadata_json"] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+
+    # OCR text has no reliable one-to-one relation to the native PDF text
+    # geometry. Keep the normal page-text translation path for mixed/OCR PDFs.
+    page_methods = [
+        str(page.get("method") or "")
+        for page in (metadata.get("pages") or [])
+        if isinstance(page, dict)
+    ]
+    if any(method == "ocr" for method in page_methods):
+        return None
+
+    path = settings.layout_dir / f"{sha256}.json"
+    if not path.is_file():
+        return None
+    try:
+        layout = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(layout, dict)
+        or layout.get("document_sha256") != sha256
+        or not isinstance(layout.get("pages"), list)
+    ):
+        return None
+    return layout
+
+
+def _layout_block_source_text(block: dict) -> str:
+    lines = []
+    for line in block.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        value = str(line.get("text") or "").strip()
+        if value:
+            lines.append(value)
+    return " ".join(lines).strip()
+
+
+def _translate_layout_quality(
+    layout: dict,
+    engine: QualityTranslator,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+    should_pause: Callable[[], bool] | None = None,
+) -> tuple[list[tuple[int | None, str]], dict]:
+    """Translate stable PDF layout blocks and preserve their geometry mapping."""
+    source_pages = [
+        page for page in (layout.get("pages") or [])
+        if isinstance(page, dict)
+    ]
+    total_blocks = sum(
+        1
+        for page in source_pages
+        for block in (page.get("blocks") or [])
+        if isinstance(block, dict) and _layout_block_source_text(block)
+    )
+    completed = 0
+    translated_pages: list[dict] = []
+    translated_sections: list[tuple[int | None, str]] = []
+
+    if progress:
+        progress(0, max(1, total_blocks), "Preparing layout-aware Quality Translation…")
+
+    for page in source_pages:
+        page_number = int(page.get("page") or len(translated_pages) + 1)
+        translated_blocks: list[dict] = []
+        page_text: list[str] = []
+
+        blocks = [
+            block for block in (page.get("blocks") or [])
+            if isinstance(block, dict)
+        ]
+        source_texts = [
+            _layout_block_source_text(block)
+            for block in blocks
+        ]
+        nonempty_indices = [
+            index for index, value in enumerate(source_texts)
+            if value
+        ]
+
+        outputs_by_index: dict[int, str] = {}
+        # Batch at page level from the caller's perspective. QualityTranslator
+        # currently performs deterministic per-unit inference internally, while
+        # this keeps the layout mapping stable and ready for future batching.
+        for index in nonempty_indices:
+            _wait_while_paused(
+                should_pause,
+                progress,
+                completed,
+                max(1, total_blocks),
+            )
+            source_text = source_texts[index]
+            translated_text = engine.translate_text(source_text).strip()
+            outputs_by_index[index] = translated_text
+            completed += 1
+            if progress:
+                progress(
+                    completed,
+                    max(1, total_blocks),
+                    f"Quality layout · page {page_number} · block {completed}/{total_blocks}",
+                )
+
+        for index, block in enumerate(blocks):
+            source_text = source_texts[index]
+            translated_text = outputs_by_index.get(index, "")
+            if not source_text:
+                continue
+
+            translated_block = {
+                "id": str(block.get("id") or ""),
+                "bbox": list(block.get("bbox") or []),
+                "source_text": source_text,
+                "translated_text": translated_text,
+                "lines": block.get("lines") or [],
+            }
+            translated_blocks.append(translated_block)
+            if translated_text:
+                page_text.append(translated_text)
+
+        translated_pages.append(
+            {
+                "page": page_number,
+                "width": page.get("width"),
+                "height": page.get("height"),
+                "rotation": page.get("rotation", 0),
+                "blocks": translated_blocks,
+            }
+        )
+        translated_sections.append((page_number, "\n\n".join(page_text).strip()))
+
+    artifact = {
+        "version": 1,
+        "document_sha256": layout.get("document_sha256"),
+        "source_path": layout.get("source_path"),
+        "source_lang": engine.source_lang,
+        "target_lang": engine.target_lang,
+        "engine": "m2m100-418m-int8",
+        "model": engine.model_id,
+        "pages": translated_pages,
+    }
+    return translated_sections, artifact
+
+
 def translate_document(
     settings,
     db,
@@ -258,6 +410,7 @@ def translate_document(
     engine_name = "custom"
     engine_meta: dict = {}
     used_fast_translation = False
+    layout_translation_artifact: dict | None = None
 
     if custom_translator:
         translated = _translate_sections_legacy(
@@ -352,17 +505,31 @@ def translate_document(
                 if progress:
                     progress(0, len(sections), f"Using Quality Translation · M2M100 418M INT8 · {src}→{dst}")
                 quality_engine = QualityTranslator(settings, src, dst)
-                translated = _translate_sections_quality(
-                    sections,
-                    quality_engine,
-                    progress=progress,
-                    should_pause=should_pause,
+                source_layout = _load_pdf_layout_for_translation(
+                    settings,
+                    doc,
+                    sha256,
                 )
+                if source_layout is not None:
+                    translated, layout_translation_artifact = _translate_layout_quality(
+                        source_layout,
+                        quality_engine,
+                        progress=progress,
+                        should_pause=should_pause,
+                    )
+                else:
+                    translated = _translate_sections_quality(
+                        sections,
+                        quality_engine,
+                        progress=progress,
+                        should_pause=should_pause,
+                    )
                 engine_name = "m2m100-418m-int8"
                 engine_meta = {
                     "model": QUALITY_MODEL_ID,
                     "compute_type": quality_engine.compute_type,
                     "literal_segment_fallbacks": quality_engine.literal_segment_fallbacks,
+                    "layout_translation": bool(layout_translation_artifact),
                 }
             elif selected_engine == "quality":
                 raise RuntimeError(
@@ -398,6 +565,20 @@ def translate_document(
     body = _render_markdown(doc["source_path"], sha256, src, dst, created_at, translated)
     _atomic_write(output_path, body)
 
+    layout_translation_path = None
+    if layout_translation_artifact is not None:
+        layout_translation_artifact.update(
+            {
+                "created_at": created_at,
+                "translation_markdown": str(output_path),
+            }
+        )
+        layout_translation_path = output_path.with_suffix(".layout.json")
+        _atomic_write(
+            layout_translation_path,
+            json.dumps(layout_translation_artifact, ensure_ascii=False, indent=2) + "\n",
+        )
+
     metadata = {
         "document_sha256": sha256,
         "source_path": doc["source_path"],
@@ -406,6 +587,11 @@ def translate_document(
         "created_at": created_at,
         "engine": engine_name,
         "output_path": str(output_path),
+        "layout_translation_path": (
+            str(layout_translation_path)
+            if layout_translation_path is not None
+            else None
+        ),
         **engine_meta,
     }
     meta_path = output_path.with_suffix(output_path.suffix + ".json")
