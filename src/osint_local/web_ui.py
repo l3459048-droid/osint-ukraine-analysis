@@ -14,7 +14,7 @@ def _layout(title: str, body: str) -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.16</span></a><nav>
+<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.17</span></a><nav>
 <a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
@@ -170,9 +170,14 @@ def _system_panel(status: dict, csrf_token: str) -> str:
     action = status.get("action") or {}
     translation = status.get("translation") or {}
     fast_setup = status.get("fast_setup") or {}
+    quality_setup = status.get("quality_setup") or {}
+    quality_ready = bool(queue.get("quality_ready"))
+    quality_available = bool(queue.get("quality_available"))
+    quality_benchmark = queue.get("quality_benchmark") or {}
     current_activity = translation if translation.get("status") in {"running", "failed"} else action
     action_message = current_activity.get("error") or current_activity.get("message") or "Ready"
     fast_message = fast_setup.get("error") or fast_setup.get("message") or ""
+    quality_message = quality_setup.get("error") or quality_setup.get("message") or ""
     semantic = "Ready" if status.get("semantic_available") else "Not installed"
     ollama = "Ready" if status.get("ollama_reachable") else "Unavailable"
     tesseract = status.get("tesseract") or "Not found"
@@ -210,6 +215,32 @@ def _system_panel(status: dict, csrf_token: str) -> str:
             '<small>' + _e(detail) + '</small></div>' + button + '</div>'
         )
 
+    quality_detail = "One-time ~2 GB model download + INT8 conversion required."
+    if quality_ready:
+        quality_detail = "M2M100 418M INT8 ready for suspicious segments."
+        quality_row = quality_benchmark.get("quality") or {}
+        fast_row = quality_benchmark.get("fast") or {}
+        if quality_row:
+            quality_detail += (
+                f" Reference similarity {quality_row.get('mean_reference_similarity', 'n/a')}"
+                f" · {quality_row.get('chars_per_second', 'n/a')} chars/s."
+            )
+        if fast_row:
+            quality_detail += (
+                f" OPUS reference similarity {fast_row.get('mean_reference_similarity', 'n/a')}."
+            )
+
+    if quality_ready:
+        quality_button = '<span class="ready-mark">Ready</span>'
+    elif quality_available:
+        quality_button = (
+            f'<form class="fast-setup-form" action="/actions/prepare-quality-translation" method="post" data-quality-setup>'
+            f'<input type="hidden" name="csrf" value="{_e(csrf_token)}">'
+            '<button type="submit">Prepare Quality</button></form>'
+        )
+    else:
+        quality_button = '<span class="panel-subtle">Run updater</span>'
+
     return f"""<section class="stats-grid">
 {_stat_card("Documents", status.get("documents", 0))}
 {_stat_card("Index queue", status.get("index_pending", 0))}
@@ -233,7 +264,13 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 <div class="fast-status" data-fast-status>{_e(fast_message if fast_setup.get("status") in {"running", "failed"} else "")}</div>
 {fast_pair("en", "English")}
 {fast_pair("uk", "Ukrainian")}
-<div class="ask-filter-note">After a pair is prepared, automatic translation prefers Fast Translation. Argos remains a fallback. Chat and Ask pause translation at safe batch boundaries.</div>
+<div class="ask-filter-note">After a pair is prepared, automatic translation prefers Fast Translation. Chat and Ask pause translation at safe batch boundaries.</div>
+</section>
+<section class="panel fast-translation-panel">
+<div class="panel-head"><div><h2>Quality Translation</h2><span class="panel-subtle">M2M100 418M · CTranslate2 INT8 · only for suspicious segments</span></div></div>
+<div class="fast-status" data-quality-status>{_e(quality_message if quality_setup.get("status") in {"running", "failed"} else "")}</div>
+<div class="fast-pair"><div><strong>English / Ukrainian → Russian</strong><small>{_e(quality_detail)}</small></div>{quality_button}</div>
+<div class="ask-filter-note">Auto mode keeps OPUS as the fast path. The Quality model is loaded lazily only after the quality gate rejects a segment. Protected dates, numbers, URLs and codes are restored exactly before scoring.</div>
 </section>"""
 
 def _translation_panel(csrf_token: str, sha256: str, translations, *, available: bool, pairs: set[tuple[str, str]], action: dict) -> str:
@@ -706,6 +743,66 @@ UI_SCRIPT = r"""
       }
     }));
     pollFastSetup();
+  }
+
+  const qualitySetupForms = [...document.querySelectorAll('[data-quality-setup]')];
+  if (qualitySetupForms.length) {
+    const qualityStatus = document.querySelector('[data-quality-status]');
+    let qualitySetupRunning = false;
+
+    async function pollQualitySetup() {
+      try {
+        const response = await fetch('/api/activity', {cache: 'no-store'});
+        if (response.ok) {
+          const data = await response.json();
+          const state = data.quality_setup || {};
+          const relevant = state.kind === 'quality-translation-setup';
+          qualitySetupRunning = relevant && state.status === 'running';
+          qualitySetupForms.forEach(form => {
+            const button = form.querySelector('button');
+            if (button) button.disabled = qualitySetupRunning;
+          });
+          if (relevant && qualityStatus) {
+            qualityStatus.textContent = state.error || state.message || '';
+            qualityStatus.classList.toggle('action-error', state.status === 'failed');
+          }
+          if (relevant && state.status === 'succeeded') {
+            setTimeout(() => location.reload(), 500);
+            return;
+          }
+        }
+      } catch (_) {}
+      setTimeout(pollQualitySetup, qualitySetupRunning ? 700 : 3000);
+    }
+
+    qualitySetupForms.forEach(form => form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button');
+      if (button) button.disabled = true;
+      if (qualityStatus) {
+        qualityStatus.classList.remove('action-error');
+        qualityStatus.textContent = 'Preparing M2M100 Quality Translation model…';
+      }
+      try {
+        const response = await fetch(form.action, {
+          method: 'POST',
+          body: new URLSearchParams(new FormData(form)),
+          headers: {'X-Requested-With': 'fetch'},
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Quality Translation setup failed');
+        qualitySetupRunning = true;
+        const state = data.quality_setup || data.action || {};
+        if (qualityStatus) qualityStatus.textContent = state.message || 'Starting…';
+      } catch (error) {
+        if (button) button.disabled = false;
+        if (qualityStatus) {
+          qualityStatus.classList.add('action-error');
+          qualityStatus.textContent = error.message || 'Quality Translation setup failed';
+        }
+      }
+    }));
+    pollQualitySetup();
   }
 
   const askForm = document.querySelector('[data-ask-form]');
