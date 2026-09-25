@@ -3741,6 +3741,8 @@ def test_maintenance_uses_incremental_taxonomy_before_full_rebuild(tmp_path: Pat
 
 
 def test_taxonomy_document_vectors_stream_and_average_chunk_embeddings(tmp_path: Path):
+    import pytest
+
     from osint_local.search import _normalize_vector, _vector_to_blob
     from osint_local.taxonomy import _document_vectors
 
