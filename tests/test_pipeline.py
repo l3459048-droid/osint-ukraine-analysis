@@ -3936,3 +3936,209 @@ def test_taxonomy_ollama_label_batches_check_interactive_pause(monkeypatch):
     assert result == {}
     assert len(waits) == 2
     assert len(calls) == 2
+
+
+
+def test_taxonomy_unassigned_documents_only_returns_embedded_novel_docs(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    try:
+        assigned_path = settings.input_dir / "assigned.txt"
+        assigned_path.write_text("FPV drone operations", encoding="utf-8")
+        assigned = pipeline.process_file(assigned_path)
+        assigned_chunk = pipeline.db.chunks_for_document(assigned.sha256, limit=1)[0]
+
+        novel_path = settings.input_dir / "novel.txt"
+        novel_path.write_text("Tourism accreditation curriculum", encoding="utf-8")
+        novel = pipeline.process_file(novel_path)
+        novel_chunk = pipeline.db.chunks_for_document(novel.sha256, limit=1)[0]
+
+        no_embedding_path = settings.input_dir / "no-embedding.txt"
+        no_embedding_path.write_text("No semantic vector yet", encoding="utf-8")
+        pipeline.process_file(no_embedding_path)
+
+        vector = _normalize_vector([1.0, 0.0])
+        pipeline.db.save_embeddings(
+            [
+                (
+                    assigned_chunk["id"],
+                    settings.search["model"],
+                    len(vector),
+                    _vector_to_blob(vector),
+                ),
+                (
+                    novel_chunk["id"],
+                    settings.search["model"],
+                    len(vector),
+                    _vector_to_blob(vector),
+                ),
+            ]
+        )
+
+        now = "2026-09-25T00:00:00+00:00"
+        run_id = pipeline.db.begin_taxonomy_run(
+            started_at=now,
+            model=settings.search["model"],
+            document_count=3,
+            embedding_count=2,
+        )
+        pipeline.db.replace_taxonomy(
+            run_id=run_id,
+            finished_at=now,
+            categories=[
+                {
+                    "key": "category-drone",
+                    "name": "Drones",
+                    "description": "Drone material",
+                    "keywords_json": '["drone"]',
+                    "centroid": _vector_to_blob(vector),
+                    "dimension": len(vector),
+                    "document_count": 1,
+                    "topic_count": 1,
+                    "source": "discovered",
+                }
+            ],
+            topics=[
+                {
+                    "key": "topic-fpv",
+                    "category_key": "category-drone",
+                    "name": "FPV",
+                    "description": "FPV topic",
+                    "keywords_json": '["fpv", "drone"]',
+                    "centroid": _vector_to_blob(vector),
+                    "dimension": len(vector),
+                    "document_count": 1,
+                    "source": "discovered",
+                }
+            ],
+            category_assignments=[
+                (assigned.sha256, "category-drone", 0.95),
+            ],
+            topic_assignments=[
+                (assigned.sha256, "topic-fpv", 0.95),
+            ],
+            details_json='{"coverage": 0.5, "unassigned_documents": 1}',
+        )
+
+        rows = pipeline.db.taxonomy_unassigned_documents()
+        assert [row["sha256"] for row in rows] == [novel.sha256]
+        assert pipeline.db.get_taxonomy_category("category-drone")["name"] == "Drones"
+        topic = pipeline.db.get_taxonomy_topic("topic-fpv")
+        assert topic["name"] == "FPV"
+        assert topic["category_name"] == "Drones"
+    finally:
+        pipeline.close()
+
+
+def test_web_corpus_novel_and_topic_detail_views(tmp_path: Path):
+    import urllib.request
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        assigned_path = settings.input_dir / "assigned.txt"
+        assigned_path.write_text("FPV drone operations", encoding="utf-8")
+        assigned = pipeline.process_file(assigned_path)
+        assigned_chunk = pipeline.db.chunks_for_document(assigned.sha256, limit=1)[0]
+
+        novel_path = settings.input_dir / "novel.txt"
+        novel_path.write_text("Tourism accreditation curriculum", encoding="utf-8")
+        novel = pipeline.process_file(novel_path)
+        novel_chunk = pipeline.db.chunks_for_document(novel.sha256, limit=1)[0]
+
+        vector = _normalize_vector([1.0, 0.0])
+        pipeline.db.save_embeddings(
+            [
+                (
+                    assigned_chunk["id"],
+                    settings.search["model"],
+                    len(vector),
+                    _vector_to_blob(vector),
+                ),
+                (
+                    novel_chunk["id"],
+                    settings.search["model"],
+                    len(vector),
+                    _vector_to_blob(vector),
+                ),
+            ]
+        )
+
+        now = "2026-09-25T00:00:00+00:00"
+        run_id = pipeline.db.begin_taxonomy_run(
+            started_at=now,
+            model=settings.search["model"],
+            document_count=2,
+            embedding_count=2,
+        )
+        pipeline.db.replace_taxonomy(
+            run_id=run_id,
+            finished_at=now,
+            categories=[
+                {
+                    "key": "category-drone",
+                    "name": "Military Technology",
+                    "description": "Broad drone and technology material",
+                    "keywords_json": '["drone", "uav"]',
+                    "centroid": _vector_to_blob(vector),
+                    "dimension": len(vector),
+                    "document_count": 1,
+                    "topic_count": 1,
+                    "source": "discovered",
+                }
+            ],
+            topics=[
+                {
+                    "key": "topic-fpv",
+                    "category_key": "category-drone",
+                    "name": "FPV Drones",
+                    "description": "Specific FPV drone operations",
+                    "keywords_json": '["fpv", "drone", "uav"]',
+                    "centroid": _vector_to_blob(vector),
+                    "dimension": len(vector),
+                    "document_count": 1,
+                    "source": "discovered",
+                }
+            ],
+            category_assignments=[
+                (assigned.sha256, "category-drone", 0.95),
+            ],
+            topic_assignments=[
+                (assigned.sha256, "topic-fpv", 0.95),
+            ],
+            details_json='{"coverage": 0.5, "unassigned_documents": 1}',
+        )
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/taxonomy?view=unassigned", timeout=5) as response:
+            novel_body = response.read().decode("utf-8")
+        assert "Unassigned / Novel documents" in novel_body
+        assert "novel.txt" in novel_body
+        assert "assigned.txt" not in novel_body
+
+        with urllib.request.urlopen(base + "/taxonomy?topic=topic-fpv", timeout=5) as response:
+            topic_body = response.read().decode("utf-8")
+        assert "FPV Drones" in topic_body
+        assert "Specific FPV drone operations" in topic_body
+        assert "Military Technology" in topic_body
+        assert "semantic match" in topic_body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
