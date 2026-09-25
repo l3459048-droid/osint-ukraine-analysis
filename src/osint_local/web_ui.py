@@ -514,6 +514,15 @@ def _category_list(categories: list[dict]) -> str:
     ) + "</div>"
 
 
+def _adaptive_category_list(categories) -> str:
+    if not categories:
+        return '<div class="empty">No adaptive categories yet.</div>'
+    return '<div class="category-list">' + "".join(
+        f'<a href="/taxonomy?{urlencode({"category": row["category_key"]})}"><span>{_e(row["name"])}</span><b>{int(row["document_count"])}</b></a>'
+        for row in categories
+    ) + "</div>"
+
+
 def _classification_badges(classes) -> str:
     if not classes:
         return '<div class="empty">No classifications.</div>'
