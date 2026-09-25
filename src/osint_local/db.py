@@ -383,6 +383,20 @@ class Database:
             ).fetchone()
             return int(row["n"])
 
+    def embedding_signature(self, model: str) -> str:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT COUNT(*) AS n,
+                          COALESCE(SUM(e.chunk_id), 0) AS id_sum,
+                          COALESCE(MAX(e.chunk_id), 0) AS id_max
+                   FROM embeddings e
+                   JOIN chunks c ON c.id=e.chunk_id
+                   JOIN documents d ON d.sha256=c.document_sha256
+                   WHERE e.model=? AND d.status='done'""",
+                (model,),
+            ).fetchone()
+        return f"{int(row['n'])}:{int(row['id_sum'])}:{int(row['id_max'])}"
+
     def iter_embeddings(self, model: str, filters: dict | None = None) -> list[sqlite3.Row]:
         clause, params = self._document_filter_clause(filters, alias="d")
         with self._lock:
