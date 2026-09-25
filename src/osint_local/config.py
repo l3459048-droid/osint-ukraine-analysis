@@ -38,6 +38,7 @@ PERFORMANCE_PROFILES = {
             "max_per_cycle": 1,
             "fast_batch_tokens": 0,
             "fast_text_batch": 16,
+            "fast_page_batch": 4,
         },
         "background": {"interval_seconds": 90},
         "qa": {
@@ -57,6 +58,7 @@ PERFORMANCE_PROFILES = {
             "max_per_cycle": 2,
             "fast_batch_tokens": 0,
             "fast_text_batch": 32,
+            "fast_page_batch": 8,
         },
         "background": {"interval_seconds": 60},
         "qa": {
@@ -109,8 +111,9 @@ DEFAULT_CONFIG = {
         "passive_enabled": True,
         "max_per_cycle": 1,
         "fast_compute_type": "int8",
-        "fast_batch_tokens": 2048,
+        "fast_batch_tokens": 0,
         "fast_text_batch": 16,
+        "fast_page_batch": 4,
         "fast_max_input_tokens": 220,
         "fast_inter_threads": 0,
         "fast_intra_threads": 0,
