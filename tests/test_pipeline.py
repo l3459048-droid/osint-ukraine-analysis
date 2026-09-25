@@ -1767,3 +1767,43 @@ def test_fast_translation_batches_paragraphs_across_multiple_pages(tmp_path: Pat
     assert stats.pages_translated == 4
     assert stats.page_batch == 3
     assert stats.chars_per_second > 0
+
+
+def test_manual_translate_action_forces_auto_engine_even_if_config_says_argos(tmp_path: Path, monkeypatch):
+    import time
+    import osint_local.actions as actions
+
+    settings = load_settings(make_config(tmp_path))
+    settings.translation["engine"] = "argos"
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "manual-engine.txt"
+    source.write_text("English source document.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    captured = {}
+
+    def fake_translate_document(settings, db, sha256, **kwargs):
+        captured.update(kwargs)
+        return {
+            "document_sha256": sha256,
+            "source_lang": kwargs["source_lang"],
+            "target_lang": kwargs["target_lang"],
+            "engine": "ctranslate2-int8",
+        }
+
+    try:
+        processed = pipeline.process_file(source)
+        monkeypatch.setattr(actions, "translate_document", fake_translate_document)
+        manager = actions.ActionManager(pipeline)
+        manager.start_translate(processed.sha256, "auto", "ru")
+
+        deadline = time.time() + 2
+        state = manager.snapshot()
+        while state["status"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+            state = manager.snapshot()
+
+        assert state["status"] == "succeeded"
+        assert captured["engine"] == "auto"
+    finally:
+        pipeline.close()
