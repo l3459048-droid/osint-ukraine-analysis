@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.14
+# OSINT Ukraine Analysis — local-first v0.9.15
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.14
+## Что делает v0.9.15
 
 ```text
 папка документов
@@ -98,6 +98,14 @@ osint-local translate <SHA256> --from auto
 ```
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
+
+## PDF extraction quality layer v0.9.15
+
+PDF extraction больше не решает вопрос OCR только по количеству символов. Native PyMuPDF text извлекается с восстановлением reading order (`sort=True`) и получает quality score по читаемости, replacement/control characters, повторяющемуся шуму и общему составу текста. OCR запускается для коротких или подозрительных страниц и заменяет native text только когда его quality score лучше с безопасным запасом.
+
+При извлечении также удаляются невидимые Unicode artifacts (NBSP, zero-width characters, soft hyphen), но содержательные символы, подчёркивания и исходный текст не уничтожаются. В metadata каждой PDF-страницы сохраняются native/OCR/selected quality scores и факт OCR probe.
+
+Pipeline version повышена до 3, поэтому после обновления неизменённые ранее обработанные документы будут один раз автоматически переизвлечены при Scan. Fast Translation checkpoints теперь также имеют собственную pipeline version, чтобы незавершённый перевод со старым алгоритмом не мог пережить обновление и смешаться с новым результатом.
 
 ## Structured PDF translation quality v0.9.14
 
