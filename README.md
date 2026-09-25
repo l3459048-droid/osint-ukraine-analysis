@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.6
+# OSINT Ukraine Analysis — local-first v0.9.7
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.6
+## Что делает v0.9.7
 
 ```text
 папка документов
@@ -99,7 +99,11 @@ osint-local translate <SHA256> --from auto
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
 
-## Fast Translation v0.9.6
+## Fast Translation v0.9.7
+
+### Translation throughput
+
+Fast Translation now batches text across several pages instead of translating each page in isolation. Economy uses 4-page windows and Balanced uses 8-page windows by default. Checkpoints are written once per completed page window instead of rewriting the full accumulated translation after every page. Progress reports both pages/min and chars/s so dense and sparse PDFs can be compared more accurately.
 
 ### Windows Unicode path fix
 
