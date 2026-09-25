@@ -1994,3 +1994,19 @@ def test_web_translation_docx_export_downloads_existing_translation(tmp_path: Pa
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_fast_translation_quality_guards_scale_decoding_to_real_input():
+    import osint_local.fast_translation as fast
+
+    short = fast._decode_options([["▁короткий"] * 8])
+    long = fast._decode_options([["▁довгий"] * 220])
+
+    assert short["beam_size"] == 2
+    assert short["repetition_penalty"] > 1
+    assert short["no_repeat_ngram_size"] >= 3
+    assert short["max_decoding_length"] == 48
+    assert long["max_decoding_length"] < 440
+    assert long["max_decoding_length"] <= 384
+    assert long["max_decoding_length"] > short["max_decoding_length"]

@@ -17,6 +17,9 @@ FAST_MODELS = {
 
 FAST_CORE_FILES = ("model.bin", "config.json")
 FAST_TOKENIZER_FILES = ("source.spm", "target.spm")
+FAST_BEAM_SIZE = 2
+FAST_REPETITION_PENALTY = 1.1
+FAST_NO_REPEAT_NGRAM_SIZE = 3
 
 
 @dataclass(frozen=True)
@@ -256,6 +259,17 @@ def _load_sentencepiece_processor(spm_module, path: Path):
     return processor
 
 
+def _decode_options(tokenized: Sequence[Sequence[str]]) -> dict:
+    longest_source = max((len(tokens) for tokens in tokenized), default=0)
+    max_decoding_length = max(48, min(384, int(longest_source * 1.8) + 24))
+    return {
+        "beam_size": FAST_BEAM_SIZE,
+        "repetition_penalty": FAST_REPETITION_PENALTY,
+        "no_repeat_ngram_size": FAST_NO_REPEAT_NGRAM_SIZE,
+        "max_decoding_length": max_decoding_length,
+    }
+
+
 class FastTranslator:
     def __init__(self, settings, source_lang: str, target_lang: str = "ru"):
         if not fast_model_ready(settings, source_lang, target_lang):
@@ -317,10 +331,9 @@ class FastTranslator:
             tokenized,
             max_batch_size=self.batch_tokens,
             batch_type="tokens",
-            beam_size=1,
             return_scores=False,
             max_input_length=self.max_input_tokens,
-            max_decoding_length=max(128, min(512, self.max_input_tokens * 2)),
+            **_decode_options(tokenized),
         )
 
         grouped: list[list[str]] = [[] for _ in texts]
