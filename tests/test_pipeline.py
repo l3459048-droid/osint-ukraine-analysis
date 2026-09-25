@@ -1878,3 +1878,119 @@ def test_manual_translation_can_start_while_maintenance_is_running(tmp_path: Pat
         if server is not None:
             server.server_close()
         pipeline.close()
+
+
+
+def test_translation_docx_export_preserves_cyrillic_and_page_breaks(tmp_path: Path):
+    import zipfile
+
+    from docx import Document
+    from osint_local.translation_export import export_translation_docx
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "ukrainian.txt"
+    source.write_text("Тестовий документ.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    try:
+        processed = pipeline.process_file(source)
+        output_dir = settings.translations_dir / "ru"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path = output_dir / f"ukrainian.{processed.sha256[:10]}.ru.md"
+        markdown_path.write_text(
+            "# Translation — ukrainian.txt\n\n"
+            f"- Source: `ukrainian.txt`\n"
+            f"- SHA-256: `{processed.sha256}`\n"
+            "- Language: `uk` → `ru`\n"
+            "- Generated: `2026-09-25T08:28:22+00:00`\n\n"
+            "## Page 1\n\nРусский перевод — первая страница.\n\n"
+            "## Page 2\n\nРусский перевод — вторая страница.\n",
+            encoding="utf-8",
+        )
+        pipeline.db.save_translation(
+            sha256=processed.sha256,
+            source_lang="uk",
+            target_lang="ru",
+            output_path=str(markdown_path),
+            created_at="2026-09-25T08:28:22+00:00",
+            engine="ctranslate2-int8",
+        )
+
+        output_path = export_translation_docx(
+            settings, pipeline.db, processed.sha256, "uk", "ru"
+        )
+
+        assert output_path == markdown_path.with_suffix(".docx")
+        assert output_path.is_file()
+        exported = Document(output_path)
+        text = "\n".join(paragraph.text for paragraph in exported.paragraphs)
+        assert "Translation — ukrainian.txt" in text
+        assert "Russian" not in text
+        assert "Русский перевод — первая страница." in text
+        assert "Русский перевод — вторая страница." in text
+        assert "Engine: ctranslate2-int8" in text
+
+        with zipfile.ZipFile(output_path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        assert 'w:type="page"' in document_xml
+    finally:
+        pipeline.close()
+
+
+def test_web_translation_docx_export_downloads_existing_translation(tmp_path: Path):
+    import re
+    import threading
+    import urllib.request
+
+    from osint_local.translation import translate_document
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "ukrainian.txt"
+    source.write_text("Тестовий український документ.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        processed = pipeline.process_file(source)
+        translate_document(
+            settings,
+            pipeline.db,
+            processed.sha256,
+            source_lang="uk",
+            target_lang="ru",
+            translator=lambda text, src, dst: "Русский перевод — DOCX проверка",
+        )
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/documents/{processed.sha256}", timeout=5
+        ) as response:
+            body = response.read().decode("utf-8")
+        assert "DOCX" in body
+        assert f"/translation-export/{processed.sha256}/uk/ru/docx" in body
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/translation-export/{processed.sha256}/uk/ru/docx",
+            timeout=5,
+        ) as response:
+            payload = response.read()
+            assert response.headers.get_content_type() == (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            assert response.headers.get("Content-Disposition", "").startswith("attachment;")
+        assert payload.startswith(b"PK")
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()

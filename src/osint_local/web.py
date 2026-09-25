@@ -27,6 +27,7 @@ from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
 from .search import search_chunks
 from .translation import argos_available, installed_pairs, translate_document, translation_queue_status
+from .translation_export import export_translation_docx
 from .web_ui import (
     _action_panel,
     _activity_details,
@@ -573,6 +574,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._document_page(path.split("/", 2)[2], query)
             elif path.startswith("/source/"):
                 self._source(path.split("/", 2)[2], head_only=False)
+            elif path.startswith("/translation-export/"):
+                self._translation_export(path)
             elif path.startswith("/translation/"):
                 self._translation_file(path)
             elif path == "/api/search":
@@ -1313,6 +1316,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._html(str(status.value), _page_header(str(status.value), str(data.get("error") or "Action failed")), status=status)
 
+    def _translation_export(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 5 or parts[0] != "translation-export" or parts[4] != "docx":
+            self._error(HTTPStatus.NOT_FOUND, "Translation export not found")
+            return
+        _, sha256, source_lang, target_lang, _ = parts
+        if (
+            not SHA_RE.fullmatch(sha256)
+            or source_lang not in {"en", "uk"}
+            or target_lang != "ru"
+        ):
+            self._error(HTTPStatus.NOT_FOUND, "Translation export not found")
+            return
+        try:
+            output_path = export_translation_docx(
+                self.settings,
+                self.db,
+                sha256,
+                source_lang,
+                target_lang,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            status = (
+                HTTPStatus.NOT_FOUND
+                if "not found" in message.casefold() or "missing" in message.casefold()
+                else HTTPStatus.BAD_REQUEST
+            )
+            self._error(status, message)
+            return
+        self._send_file(
+            output_path,
+            head_only=False,
+            content_type_override=(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            disposition="attachment",
+        )
+
     def _translation_file(self, path: str) -> None:
         parts = path.strip("/").split("/")
         if len(parts) != 4 or parts[0] != "translation":
@@ -1366,6 +1408,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         *,
         head_only: bool,
         content_type_override: str | None = None,
+        disposition: str = "inline",
     ) -> None:
         size = path.stat().st_size
         content_type = content_type_override or (
@@ -1403,7 +1446,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{quote(path.name)}")
+        self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{quote(path.name)}")
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
