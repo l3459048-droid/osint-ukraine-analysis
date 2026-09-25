@@ -170,24 +170,76 @@ def build_adaptive_taxonomy(
         topic_assignments: list[tuple[str, str, float]] = []
         category_scores: dict[tuple[str, str], float] = {}
         assigned_documents: set[str] = set()
+        topic_documents: dict[str, set[str]] = defaultdict(set)
+        category_documents: dict[str, set[str]] = defaultdict(set)
+        assignment_threshold = float(
+            taxonomy_config.get("topic_assignment_similarity", 0.68)
+        )
+        max_topics_per_document = max(
+            1,
+            int(taxonomy_config.get("max_topics_per_document", 4) or 4),
+        )
+
+        primary_topic: dict[str, str] = {}
         for topic in topic_records:
             for member in topic["cluster"]["members"]:
-                sha256 = str(member["id"])
-                score = max(0.0, _dot(member["vector"], topic["vector"]))
+                primary_topic[str(member["id"])] = topic["key"]
+
+        for document in documents:
+            sha256 = str(document["id"])
+            scored_topics = sorted(
+                (
+                    (_dot(document["vector"], topic["vector"]), topic)
+                    for topic in topic_records
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            selected: list[tuple[float, dict[str, Any]]] = [
+                (score, topic)
+                for score, topic in scored_topics
+                if score >= assignment_threshold
+            ][:max_topics_per_document]
+
+            primary_key = primary_topic.get(sha256)
+            if primary_key and all(
+                topic["key"] != primary_key for _, topic in selected
+            ):
+                primary = next(
+                    (topic for topic in topic_records if topic["key"] == primary_key),
+                    None,
+                )
+                if primary is not None:
+                    selected.append(
+                        (_dot(document["vector"], primary["vector"]), primary)
+                    )
+
+            for score, topic in selected:
+                score = max(0.0, float(score))
                 topic_assignments.append((sha256, topic["key"], score))
+                topic_documents[topic["key"]].add(sha256)
                 assigned_documents.add(sha256)
+
                 category_key = topic.get("category_key")
                 if category_key:
                     category = category_lookup[category_key]
                     category_score = max(
                         0.0,
-                        _dot(member["vector"], category["vector"]),
+                        _dot(document["vector"], category["vector"]),
                     )
                     key = (sha256, category_key)
                     category_scores[key] = max(
                         category_scores.get(key, 0.0),
                         category_score,
                     )
+                    category_documents[category_key].add(sha256)
+
+        for topic in topic_records:
+            topic["document_count"] = len(topic_documents.get(topic["key"], set()))
+        for category in category_records:
+            category["document_count"] = len(
+                category_documents.get(category["key"], set())
+            )
 
         category_assignments = [
             (sha256, category_key, score)
@@ -236,6 +288,8 @@ def build_adaptive_taxonomy(
             "category_similarity": category_threshold,
             "category_merge_similarity": category_merge,
             "min_topic_documents": min_topic_docs,
+            "topic_assignment_similarity": assignment_threshold,
+            "max_topics_per_document": max_topics_per_document,
         }
         db.replace_taxonomy(
             run_id=run_id,
