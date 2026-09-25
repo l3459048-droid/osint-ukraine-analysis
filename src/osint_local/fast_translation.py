@@ -31,6 +31,8 @@ class FastTranslationStats:
     elapsed_seconds: float
     chars_translated: int
     pages_per_minute: float
+    chars_per_second: float
+    page_batch: int
 
 
 def fast_translation_available() -> bool:
@@ -347,27 +349,75 @@ def translate_sections_fast(
     }
 
     total = len(sections)
+    page_batch = max(
+        1,
+        min(32, int(settings.translation.get("fast_page_batch", 4) or 4)),
+    )
+    text_batch = max(
+        1,
+        min(256, int(settings.translation.get("fast_text_batch", 32) or 32)),
+    )
     if progress:
         progress(len(translated_by_index), total, "Preparing Fast Translation…")
 
     started = time.perf_counter()
     session_chars = 0
     session_pages = 0
-    for index, (page, text) in enumerate(sections):
-        if index in translated_by_index:
-            continue
-        _wait_for_interactive(should_pause, progress, len(translated_by_index), total)
+    pending_indices = [
+        index for index in range(total)
+        if index not in translated_by_index
+    ]
 
-        paragraphs = _paragraphs(text)
-        translated_parts: list[str] = []
-        for batch in _batches(paragraphs, max(1, int(settings.translation.get("fast_text_batch", 32)))):
-            _wait_for_interactive(should_pause, progress, len(translated_by_index), total)
-            translated_parts.extend(engine.translate_texts(batch))
+    for window_indices in _batches(pending_indices, page_batch):
+        _wait_for_interactive(
+            should_pause,
+            progress,
+            len(translated_by_index),
+            total,
+        )
 
-        translated_text = "\n\n".join(part for part in translated_parts if part.strip()).strip()
-        translated_by_index[index] = (page, translated_text)
-        session_chars += len(text)
-        session_pages += 1
+        page_parts: dict[int, list[str]] = {
+            index: [] for index in window_indices
+        }
+        texts_to_translate: list[str] = []
+        owners: list[int] = []
+
+        # Flatten paragraphs from multiple pages so CTranslate2 receives a
+        # useful batch even when each individual page contains little text.
+        for index in window_indices:
+            _page, text = sections[index]
+            for paragraph in _paragraphs(text):
+                texts_to_translate.append(paragraph)
+                owners.append(index)
+
+        for start_index in range(0, len(texts_to_translate), text_batch):
+            _wait_for_interactive(
+                should_pause,
+                progress,
+                len(translated_by_index),
+                total,
+            )
+            batch_texts = texts_to_translate[start_index:start_index + text_batch]
+            batch_owners = owners[start_index:start_index + text_batch]
+            translated_batch = engine.translate_texts(batch_texts)
+            if len(translated_batch) != len(batch_texts):
+                raise RuntimeError(
+                    "Fast Translation returned an unexpected number of results"
+                )
+            for owner, translated_text in zip(batch_owners, translated_batch):
+                if translated_text.strip():
+                    page_parts[owner].append(translated_text.strip())
+
+        # Commit the completed page window together. This preserves page
+        # provenance while avoiding an increasingly expensive full-checkpoint
+        # rewrite after every single page.
+        for index in window_indices:
+            page, text = sections[index]
+            translated_text = "\n\n".join(page_parts[index]).strip()
+            translated_by_index[index] = (page, translated_text)
+            session_chars += len(text)
+            session_pages += 1
+
         _save_checkpoint(
             settings,
             sha256,
@@ -376,21 +426,34 @@ def translate_sections_fast(
             engine.model_id,
             translated_by_index,
         )
+
         elapsed = max(0.001, time.perf_counter() - started)
         rate = session_pages * 60.0 / elapsed
+        chars_per_second = session_chars / elapsed
         remaining = total - len(translated_by_index)
         eta = remaining / rate if rate > 0 else 0
-        page_label = f"page {page}" if page is not None else "document"
+
+        pages = [sections[index][0] for index in window_indices]
+        visible_pages = [page for page in pages if page is not None]
+        if not visible_pages:
+            page_label = "document"
+        elif len(visible_pages) == 1:
+            page_label = f"page {visible_pages[0]}"
+        else:
+            page_label = f"pages {visible_pages[0]}–{visible_pages[-1]}"
+
         if progress:
             progress(
                 len(translated_by_index),
                 total,
                 f"Fast Translation · {page_label} · {rate:.1f} pages/min"
+                f" · {chars_per_second:.0f} chars/s"
                 + (f" · ETA {eta:.1f} min" if remaining else ""),
             )
 
     elapsed = max(0.001, time.perf_counter() - started)
     pages_per_minute = session_pages * 60.0 / elapsed if session_pages else 0.0
+    chars_per_second = session_chars / elapsed if session_chars else 0.0
     translated = [
         translated_by_index[index]
         for index in range(total)
@@ -407,9 +470,10 @@ def translate_sections_fast(
         elapsed_seconds=elapsed,
         chars_translated=session_chars,
         pages_per_minute=pages_per_minute,
+        chars_per_second=chars_per_second,
+        page_batch=page_batch,
     )
     return translated, stats
-
 
 def clear_fast_checkpoint(settings, sha256: str, target_lang: str = "ru") -> None:
     path = _checkpoint_path(settings, sha256, target_lang)
