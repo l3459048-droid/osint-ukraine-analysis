@@ -9,6 +9,7 @@ from typing import Any, Callable
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
 from .translation import next_passive_translation, translate_document
+from .taxonomy import build_adaptive_taxonomy, taxonomy_is_stale
 
 
 class ActionBusyError(RuntimeError):
@@ -64,6 +65,9 @@ class ActionManager:
     def start_maintenance(self) -> dict[str, Any]:
         return self._start("maintenance", self._run_maintenance)
 
+    def start_taxonomy(self) -> dict[str, Any]:
+        return self._start("taxonomy", self._run_taxonomy)
+
     def _start(self, kind: str, target: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
             if self._state.status == "running":
@@ -99,6 +103,7 @@ class ActionManager:
                 "scan": "Scan complete",
                 "index": "Index complete",
                 "translate": "Translation complete",
+                "taxonomy": "Taxonomy complete",
             }
             if self._state.kind == "maintenance" and result.get("paused"):
                 self._state.message = "Background paused for interactive work"
@@ -109,6 +114,7 @@ class ActionManager:
                     + int(counts.get("duplicate", 0))
                     + int(result.get("embedded_chunks") or 0)
                     + len(result.get("translated") or [])
+                    + int((result.get("taxonomy") or {}).get("topics") or 0)
                 )
                 self._state.message = "Library updated" if changed else "Library up to date"
             else:
@@ -149,6 +155,18 @@ class ActionManager:
             "embedded_chunks": count,
             "model": self.pipeline.settings.search.get("model"),
         }
+
+    def _run_taxonomy(self) -> dict[str, Any]:
+        def progress(current: int, total: int, message: str) -> None:
+            self._progress(current, total, message)
+
+        return build_adaptive_taxonomy(
+            self.pipeline.db,
+            self.pipeline.settings.search,
+            self.pipeline.settings.taxonomy,
+            self.pipeline.settings.qa,
+            progress=progress,
+        )
 
     def _run_translate(self, sha256: str, source_lang: str, target_lang: str) -> dict[str, Any]:
         def progress(current: int, total: int, message: str) -> None:
@@ -205,6 +223,35 @@ class ActionManager:
             self._progress(0, 0, "Updating semantic index…")
             embedded = self.index_builder(self.pipeline.db, settings.search)
 
+        taxonomy_result: dict[str, Any] | None = None
+        model = str(settings.search.get("model") or "")
+        semantic_complete = (
+            bool(model)
+            and self.pipeline.db.chunk_count() > 0
+            and self.pipeline.db.embedding_count(model) >= self.pipeline.db.chunk_count()
+        )
+        if (
+            bool(settings.taxonomy.get("enabled", True))
+            and bool(settings.taxonomy.get("auto_rebuild", True))
+            and semantic_complete
+            and self.pipeline.db.document_count()
+                >= max(2, int(settings.taxonomy.get("min_documents", 8) or 8))
+            and taxonomy_is_stale(self.pipeline.db, settings.search)
+        ):
+            if self.interactive_busy():
+                self._progress(0, 0, "Background paused before taxonomy rebuild")
+            else:
+                self._progress(0, 0, "Updating adaptive taxonomy…")
+                taxonomy_result = build_adaptive_taxonomy(
+                    self.pipeline.db,
+                    settings.search,
+                    settings.taxonomy,
+                    settings.qa,
+                    progress=lambda current, total, message: self._progress(
+                        current, total, message
+                    ),
+                )
+
         translated: list[str] = []
         if bool(settings.translation.get("passive_enabled", True)):
             max_per_cycle = max(1, min(5, int(settings.translation.get("max_per_cycle", 1))))
@@ -227,12 +274,13 @@ class ActionManager:
                     break
                 translated.append(item["source_path"])
 
-        if not results and not embedded and not translated:
+        if not results and not embedded and not translated and not taxonomy_result:
             self._progress(0, 0, "Library is up to date")
         return {
             "files_seen": len(results),
             "counts": counts,
             "embedded_chunks": embedded,
+            "taxonomy": taxonomy_result,
             "translated": translated,
         }
 
