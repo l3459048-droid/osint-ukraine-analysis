@@ -3737,3 +3737,117 @@ def test_maintenance_uses_incremental_taxonomy_before_full_rebuild(tmp_path: Pat
         assert result["taxonomy"]["needs_rebuild"] is False
     finally:
         pipeline.close()
+
+
+
+def test_taxonomy_document_vectors_stream_and_average_chunk_embeddings(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import _document_vectors
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "multi-chunk.txt"
+    source.write_text(
+        ("alpha drone operations " * 90)
+        + "\n\n"
+        + ("tourism curriculum accreditation " * 90),
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        result = pipeline.process_file(source)
+        chunks = pipeline.db.chunks_for_document(result.sha256, limit=10)
+        assert len(chunks) >= 2
+
+        vectors = [
+            _normalize_vector([1.0, 0.0]),
+            _normalize_vector([0.0, 1.0]),
+        ]
+        pipeline.db.save_embeddings(
+            [
+                (
+                    chunks[index]["id"],
+                    settings.search["model"],
+                    2,
+                    _vector_to_blob(vectors[index]),
+                )
+                for index in range(2)
+            ]
+        )
+
+        documents = _document_vectors(pipeline.db, settings.search["model"])
+        assert len(documents) == 1
+        vector = documents[0]["vector"]
+        assert pytest.approx(vector[0], abs=1e-4) == 2 ** -0.5
+        assert pytest.approx(vector[1], abs=1e-4) == 2 ** -0.5
+    finally:
+        pipeline.close()
+
+
+def test_incremental_taxonomy_requests_periodic_full_discovery(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import (
+        build_adaptive_taxonomy,
+        refresh_adaptive_taxonomy,
+    )
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.taxonomy.update(
+        {
+            "min_documents": 2,
+            "min_topic_documents": 2,
+            "label_with_ollama": False,
+            "full_rebuild_min_growth": 100,
+            "full_rebuild_growth_ratio": 10.0,
+            "discovery_min_unassigned": 100,
+            "discovery_unassigned_ratio": 10.0,
+            "full_rebuild_after_incremental_refreshes": 2,
+        }
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        for index in range(2):
+            source = settings.input_dir / f"periodic-{index}.txt"
+            source.write_text(f"FPV drone operations {index}", encoding="utf-8")
+            result = pipeline.process_file(source)
+            chunk = pipeline.db.chunks_for_document(result.sha256, limit=1)[0]
+            vector = _normalize_vector([1.0, 0.0])
+            pipeline.db.save_embeddings(
+                [
+                    (
+                        chunk["id"],
+                        settings.search["model"],
+                        2,
+                        _vector_to_blob(vector),
+                    )
+                ]
+            )
+
+        build_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+            settings.qa,
+        )
+
+        first = refresh_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+        )
+        assert first["needs_rebuild"] is False
+        assert first["incremental_refreshes_since_discovery"] == 1
+
+        second = refresh_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+        )
+        assert second["needs_rebuild"] is True
+        assert second["reason"] == "periodic_refresh_limit"
+        assert second["incremental_refreshes_since_discovery"] == 2
+    finally:
+        pipeline.close()
