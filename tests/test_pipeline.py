@@ -2828,3 +2828,34 @@ def test_translate_document_clears_fast_checkpoint_for_hybrid_engine(tmp_path: P
         assert cleared == [(processed.sha256, "ru")]
     finally:
         pipeline.close()
+
+
+
+def test_protected_literals_fallback_on_reordered_or_duplicated_placeholders():
+    from osint_local.translation_literals import (
+        protect_literals,
+        restore_literals,
+        translate_preserving_literals,
+    )
+
+    source = "Документ J3 действует с 01.09.2026 и содержит 240 кредитов."
+    protection = protect_literals(source)
+    placeholders = [item.placeholder for item in protection.literals]
+    assert len(placeholders) == 3
+
+    reordered = " ".join(reversed(placeholders))
+    _restored, intact = restore_literals(protection, reordered)
+    assert intact is False
+
+    duplicated = " ".join([placeholders[0], placeholders[0], *placeholders[1:]])
+    _restored, intact = restore_literals(protection, duplicated)
+    assert intact is False
+
+    output, normal_path = translate_preserving_literals(
+        source,
+        lambda value: " ".join(reversed(placeholders))
+        if "ZXQLIT" in value
+        else value,
+    )
+    assert normal_path is False
+    assert output.index("J3") < output.index("01.09.2026") < output.index("240")
