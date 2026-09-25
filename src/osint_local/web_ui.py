@@ -577,6 +577,9 @@ def _taxonomy_panel(
     action: dict,
     selected_category: str = "",
     selected_topic: str = "",
+    selected_category_row=None,
+    selected_topic_row=None,
+    show_unassigned: bool = False,
 ) -> str:
     running = (
         action.get("status") == "running"
@@ -638,8 +641,18 @@ def _taxonomy_panel(
     topics_html = "".join(topic_rows) or '<span class="translation-empty">No discovered topics yet.</span>'
 
     docs_html = _taxonomy_document_cards(documents) if documents else (
-        '<div class="empty">Select a category or topic to view matching documents.</div>'
+        '<div class="empty">No documents in this adaptive taxonomy view.</div>'
+        if show_unassigned or selected_category or selected_topic
+        else '<div class="empty">Select a category, topic, or Unassigned to view matching documents.</div>'
     )
+
+    detail_html = _taxonomy_selection_detail(
+        selected_category_row,
+        selected_topic_row,
+        show_unassigned=show_unassigned,
+        unassigned_count=unassigned,
+    )
+    unassigned_class = "chip active" if show_unassigned else "chip"
 
     return f"""<section class="stats-grid">
 {_stat_card("Adaptive categories", counts.get("categories", 0))}
@@ -653,9 +666,58 @@ def _taxonomy_panel(
 <form action="/actions/taxonomy" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{disabled}>Rebuild taxonomy</button></form></div>
 <div class="ask-filter-note">Categories and topics are discovered from document-level semantic embeddings. New documents are assigned incrementally when they match existing topics; full discovery runs only after enough corpus growth, novel unassigned documents, major shrinkage, or the periodic refresh limit. OCR, PDF extraction and translation are not re-run. Local Qwen names new clusters when available; deterministic keyword labels are used as fallback.</div>
 </section>
-<section class="panel"><div class="panel-head"><h2>Categories</h2><span class="panel-subtle">Broad semantic groups</span></div><div class="filters">{categories_html}</div></section>
+<section class="panel"><div class="panel-head"><h2>Categories</h2><span class="panel-subtle">Broad semantic groups</span></div><div class="filters"><a class="{unassigned_class}" href="/taxonomy?view=unassigned">Unassigned / Novel · {unassigned}</a>{categories_html}</div></section>
 <section class="panel"><div class="panel-head"><h2>Topics</h2><span class="panel-subtle">More specific discovered themes</span></div><div class="badges">{topics_html}</div></section>
-<section class="panel"><div class="panel-head"><h2>Documents</h2><span class="panel-subtle">Selected adaptive category/topic</span></div>{docs_html}</section>"""
+{detail_html}
+<section class="panel"><div class="panel-head"><h2>Documents</h2><span class="panel-subtle">Selected adaptive category/topic/novel set</span></div>{docs_html}</section>"""
+
+
+def _taxonomy_selection_detail(
+    category_row,
+    topic_row,
+    *,
+    show_unassigned: bool,
+    unassigned_count: int,
+) -> str:
+    if show_unassigned:
+        return f"""<section class="panel">
+<div class="panel-head"><div><h2>Unassigned / Novel documents</h2><span class="panel-subtle">{int(unassigned_count)} document(s)</span></div></div>
+<div class="ask-filter-note">These documents already have semantic embeddings but do not meet the similarity threshold for any current topic. They are the strongest signal that the next full discovery should create or reshape topics/categories.</div>
+</section>"""
+
+    row = topic_row or category_row
+    if not row:
+        return ""
+
+    try:
+        keywords = json.loads(row["keywords_json"] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        keywords = []
+    keyword_html = "".join(
+        f'<span class="badge">{_e(value)}</span>'
+        for value in keywords[:12]
+    ) or '<span class="translation-empty">No representative keywords.</span>'
+
+    if topic_row:
+        parent = str(topic_row["category_name"] or "")
+        subtitle = (
+            f'Topic · {int(topic_row["document_count"])} document(s)'
+            + (f' · category {_e(parent)}' if parent else "")
+        )
+        heading = str(topic_row["name"] or "Topic")
+    else:
+        subtitle = (
+            f'Category · {int(category_row["document_count"])} document(s)'
+            f' · {int(category_row["topic_count"])} topic(s)'
+        )
+        heading = str(category_row["name"] or "Category")
+
+    description = str(row["description"] or "").strip()
+    return f"""<section class="panel">
+<div class="panel-head"><div><h2>{_e(heading)}</h2><span class="panel-subtle">{subtitle}</span></div></div>
+<p>{_e(description) if description else "No description yet."}</p>
+<div class="badges">{keyword_html}</div>
+</section>"""
 
 
 def _taxonomy_document_cards(rows) -> str:
