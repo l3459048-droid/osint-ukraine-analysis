@@ -111,7 +111,11 @@
     "fast_inter_threads": 0,
     "fast_intra_threads": 0,
     "benchmark_chars_per_page": 1800,
-    "fast_segment_tokens": 120
+    "fast_segment_tokens": 120,
+    "quality_retry_score": 2,
+    "quality_fallback_score": 4,
+    "quality_fallback_enabled": true,
+    "quality_fallback_auto_install": false
   },
   "background": {
     "enabled": true,
