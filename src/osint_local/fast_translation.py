@@ -25,7 +25,7 @@ FAST_SOURCE_EOS_TOKEN = "</s>"
 FAST_RETRY_BEAM_SIZE = 8
 FAST_RETRY_REPETITION_PENALTY = 1.12
 FAST_RETRY_NO_REPEAT_NGRAM_SIZE = 3
-FAST_TRANSLATION_PIPELINE_VERSION = 4
+FAST_TRANSLATION_PIPELINE_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,9 @@ class FastTranslationStats:
     pages_per_minute: float
     chars_per_second: float
     page_batch: int
+    quality_retries: int
+    quality_fallbacks: int
+    quality_warnings: int
 
 
 def fast_translation_available() -> bool:
@@ -412,6 +415,57 @@ def _degeneracy_score(source: str, translated: str) -> int:
     return score
 
 
+def _translation_quality_score(
+    source: str,
+    translated: str,
+    *,
+    target_lang: str = "ru",
+) -> int:
+    source = _clean_translation_unit(source)
+    translated = str(translated or "").strip()
+    score = _degeneracy_score(source, translated)
+    if not source or not translated:
+        return score
+
+    source_visible = len(re.sub(r"\s+", "", source))
+    translated_visible = len(re.sub(r"\s+", "", translated))
+    if source_visible >= 60:
+        ratio = translated_visible / max(1, source_visible)
+        if ratio < 0.45 or ratio > 1.95:
+            score += 2
+
+    source_numbers = set(re.findall(r"(?<!\w)\d+(?:[.,:/-]\d+)*(?!\w)", source))
+    missing_numbers = [token for token in source_numbers if token not in translated]
+    score += min(3, len(missing_numbers))
+
+    source_codes = set(
+        re.findall(r"\b(?:[A-Z]{2,}(?:-[A-Z0-9]+)*|[A-Z]\d+)\b", source)
+    )
+    missing_codes = [token for token in source_codes if token not in translated]
+    score += min(2, len(missing_codes))
+
+    mixed_script_words = re.findall(
+        r"\b(?=[A-Za-zА-Яа-яЁёІіЇїЄєҐґ]*[A-Za-z])"
+        r"(?=[A-Za-zА-Яа-яЁёІіЇїЄєҐґ]*[А-Яа-яЁёІіЇїЄєҐґ])"
+        r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ]{4,}\b",
+        translated,
+    )
+    if mixed_script_words:
+        score += min(3, len(mixed_script_words))
+
+    if target_lang == "ru":
+        alpha = [char for char in translated if char.isalpha()]
+        if len(alpha) >= 20:
+            cyrillic = sum(
+                ("А" <= char <= "я") or char in "ЁёІіЇїЄєҐґ"
+                for char in alpha
+            )
+            if cyrillic / len(alpha) < 0.65:
+                score += 2
+
+    return score
+
+
 def _decode_options(tokenized: Sequence[Sequence[str]], *, retry: bool = False) -> dict:
     longest_source = max((len(tokens) for tokens in tokenized), default=0)
     max_decoding_length = max(48, min(384, int(longest_source * 1.8) + 24))
@@ -474,6 +528,17 @@ class FastTranslator:
             spm,
             self.model_dir / "target.spm",
         )
+        self.quality_retries = 0
+        self.quality_fallbacks = 0
+        self.quality_warnings = 0
+        self.quality_retry_score = max(
+            1,
+            int(settings.translation.get("quality_retry_score", 2) or 2),
+        )
+        self.quality_fallback_score = max(
+            self.quality_retry_score,
+            int(settings.translation.get("quality_fallback_score", 4) or 4),
+        )
 
     def _translate_windows(self, tokenized: list[list[str]], *, retry: bool = False) -> list[str]:
         if not tokenized:
@@ -492,7 +557,12 @@ class FastTranslator:
             decoded.append(self.target_sp.decode(pieces).strip())
         return decoded
 
-    def translate_texts(self, texts: Sequence[str]) -> list[str]:
+    def translate_texts(
+        self,
+        texts: Sequence[str],
+        *,
+        fallback_translator: Callable[[str], str] | None = None,
+    ) -> list[str]:
         tokenized: list[list[str]] = []
         ownership: list[int] = []
         for text_index, text in enumerate(texts):
@@ -520,29 +590,62 @@ class FastTranslator:
             for group in grouped
         ]
 
-        # Retry only suspicious outputs. A smaller semantic window plus a wider
-        # beam is slower, but the cost is paid only for chunks that look like
-        # runaway decoding or token-fragment leakage.
-        for index, (source, output) in enumerate(zip(texts, translated)):
-            original_score = _degeneracy_score(str(source), output)
-            if original_score <= 0:
-                continue
-            retry_windows = _semantic_token_windows(
-                str(source),
-                self.source_sp,
-                self.max_input_tokens,
-                max(48, self.segment_tokens // 2),
+        for index, (source_value, output) in enumerate(zip(texts, translated)):
+            source = str(source_value)
+            best_output = _restore_source_urls(source, output)
+            best_score = _translation_quality_score(
+                source,
+                best_output,
+                target_lang=self.target_lang,
             )
-            retry_output = " ".join(
-                part for part in self._translate_windows(retry_windows, retry=True) if part
-            ).strip()
-            if retry_output and _degeneracy_score(str(source), retry_output) < original_score:
-                translated[index] = retry_output
 
-        return [
-            _restore_source_urls(str(source), output)
-            for source, output in zip(texts, translated)
-        ]
+            if best_score >= self.quality_retry_score:
+                self.quality_retries += 1
+                retry_windows = _semantic_token_windows(
+                    source,
+                    self.source_sp,
+                    self.max_input_tokens,
+                    max(48, self.segment_tokens // 2),
+                )
+                retry_output = " ".join(
+                    part
+                    for part in self._translate_windows(retry_windows, retry=True)
+                    if part
+                ).strip()
+                retry_output = _restore_source_urls(source, retry_output)
+                retry_score = _translation_quality_score(
+                    source,
+                    retry_output,
+                    target_lang=self.target_lang,
+                )
+                if retry_output and retry_score < best_score:
+                    best_output = retry_output
+                    best_score = retry_score
+
+            if (
+                best_score >= self.quality_fallback_score
+                and fallback_translator is not None
+            ):
+                try:
+                    fallback_output = fallback_translator(source).strip()
+                except Exception:
+                    fallback_output = ""
+                fallback_output = _restore_source_urls(source, fallback_output)
+                fallback_score = _translation_quality_score(
+                    source,
+                    fallback_output,
+                    target_lang=self.target_lang,
+                )
+                if fallback_output and fallback_score < best_score:
+                    best_output = fallback_output
+                    best_score = fallback_score
+                    self.quality_fallbacks += 1
+
+            if best_score >= self.quality_fallback_score:
+                self.quality_warnings += 1
+            translated[index] = best_output
+
+        return translated
 
 
 def translate_sections_fast(
@@ -554,6 +657,7 @@ def translate_sections_fast(
     *,
     progress: Callable[[int, int, str], None] | None = None,
     should_pause: Callable[[], bool] | None = None,
+    fallback_translator: Callable[[str], str] | None = None,
 ) -> tuple[list[tuple[int | None, str]], FastTranslationStats]:
     engine = FastTranslator(settings, source_lang, target_lang)
     checkpoint = _load_checkpoint(settings, sha256, source_lang, target_lang, engine.model_id)
@@ -614,7 +718,10 @@ def translate_sections_fast(
             )
             batch_texts = texts_to_translate[start_index:start_index + text_batch]
             batch_owners = owners[start_index:start_index + text_batch]
-            translated_batch = engine.translate_texts(batch_texts)
+            translated_batch = engine.translate_texts(
+                batch_texts,
+                fallback_translator=fallback_translator,
+            )
             if len(translated_batch) != len(batch_texts):
                 raise RuntimeError(
                     "Fast Translation returned an unexpected number of results"
@@ -687,6 +794,9 @@ def translate_sections_fast(
         pages_per_minute=pages_per_minute,
         chars_per_second=chars_per_second,
         page_batch=page_batch,
+        quality_retries=engine.quality_retries,
+        quality_fallbacks=engine.quality_fallbacks,
+        quality_warnings=engine.quality_warnings,
     )
     return translated, stats
 
@@ -766,9 +876,53 @@ def load_fast_benchmark(settings, source_lang: str, target_lang: str = "ru") -> 
         return None
 
 
+def _looks_like_layout_field(line: str) -> bool:
+    value = str(line or "").strip()
+    return (
+        bool(TECHNICAL_FILL_RE.search(value))
+        or "№" in value
+        or bool(URL_RE.search(value))
+        or bool(re.match(r"^\d{1,3}[.)]\s+", value))
+        or (":" in value[:80] and len(value) <= 180)
+        or (len(value) <= 70 and not re.search(r"[,;—-]\s*$", value))
+    )
+
+
 def _paragraphs(text: str) -> list[str]:
-    parts = [part.strip() for part in str(text).split("\n\n") if part.strip()]
-    return parts or ([str(text).strip()] if str(text).strip() else [])
+    blocks = [
+        part.strip()
+        for part in re.split(r"\n\s*\n", str(text))
+        if part.strip()
+    ]
+    if not blocks:
+        return []
+
+    result: list[str] = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) <= 1:
+            result.append(block)
+            continue
+
+        current: list[str] = []
+
+        def flush() -> None:
+            nonlocal current
+            if current:
+                result.append(" ".join(current).strip())
+                current = []
+
+        for line in lines:
+            if _looks_like_layout_field(line):
+                flush()
+                result.append(line)
+                continue
+            current.append(line)
+            if re.search(r"[.!?…]\s*$", line):
+                flush()
+        flush()
+
+    return result or ([str(text).strip()] if str(text).strip() else [])
 
 
 def _batches(values: list[str], size: int):
