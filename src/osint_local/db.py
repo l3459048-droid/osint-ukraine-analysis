@@ -187,14 +187,21 @@ class Database:
                 "SELECT * FROM documents WHERE sha256 = ?", (sha256,)
             ).fetchone()
 
-    def find_current_source(self, source_path: str, size: int, mtime_ns: int):
+    def find_current_source(
+        self,
+        source_path: str,
+        size: int,
+        mtime_ns: int,
+        *,
+        min_pipeline_version: int = 2,
+    ):
         with self._lock:
             return self.conn.execute(
                 """SELECT * FROM documents
                    WHERE source_path = ? AND source_size = ? AND source_mtime_ns = ?
                      AND pipeline_version >= ? AND status='done'
                    ORDER BY id DESC LIMIT 1""",
-                (source_path, size, mtime_ns, PIPELINE_VERSION),
+                (source_path, size, mtime_ns, max(1, int(min_pipeline_version))),
             ).fetchone()
 
     def upsert_processing(
