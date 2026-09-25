@@ -463,11 +463,11 @@ def _translation_quality_score(
                 for char in alpha
             )
             if cyrillic / len(alpha) < 0.65:
-                score += 2
+                score += 4
 
         ukrainian_residue = re.findall(r"[ІіЇїЄєҐґ]", translated)
         if ukrainian_residue:
-            score += min(3, len(ukrainian_residue))
+            score += 2 + min(2, len(ukrainian_residue))
 
     return score
 
