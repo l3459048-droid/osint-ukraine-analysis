@@ -2267,3 +2267,103 @@ def test_fast_translation_paragraphs_keep_pdf_form_fields_separate():
     assert parts[1].startswith("протокол №")
     assert "Формування загальних" in parts[2]
     assert "діяльності у сфері" in parts[2]
+
+
+
+def test_pdf_layout_extraction_with_real_pymupdf_page(tmp_path: Path):
+    import fitz
+
+    from osint_local.extractors import _extract_pdf
+
+    pdf_path = tmp_path / "layout-test.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((50, 100), "Field:")
+    page.insert_text((280, 100), "Value")
+    page.insert_text((50, 130), "Second:")
+    page.insert_text((280, 130), "Another")
+    doc.save(pdf_path)
+    doc.close()
+
+    result = _extract_pdf(
+        pdf_path,
+        {
+            "enabled": False,
+            "min_text_chars_per_page": 1,
+            "quality_threshold": 0.72,
+            "ocr_improvement_margin": 0.08,
+        },
+    )
+
+    assert "Field:" in result.text
+    assert "Value" in result.text
+    assert result.pages[0]["layout_lines"] >= 4
+    assert result.pages[0]["layout_rows"] == 2
+    assert result.pages[0]["multi_part_rows"] == 2
+
+
+def test_pdf_pipeline_upgrade_reprocesses_pdf_but_not_plain_text(tmp_path: Path):
+    import fitz
+
+    config_path = make_config(tmp_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["allowed_extensions"] = [".txt", ".pdf"]
+    config["ocr"] = {"enabled": False}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    settings = load_settings(config_path)
+    settings.input_dir.mkdir(parents=True)
+
+    text_path = settings.input_dir / "note.txt"
+    text_path.write_text("plain text document", encoding="utf-8")
+
+    pdf_path = settings.input_dir / "page.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "PDF text document")
+    doc.save(pdf_path)
+    doc.close()
+
+    pipeline = LocalPipeline(settings)
+    try:
+        text_first = pipeline.process_file(text_path)
+        pdf_first = pipeline.process_file(pdf_path)
+        assert text_first.status == "processed"
+        assert pdf_first.status == "processed"
+
+        pipeline.db.conn.execute(
+            "UPDATE documents SET pipeline_version=2 WHERE sha256=?",
+            (text_first.sha256,),
+        )
+        pipeline.db.conn.execute(
+            "UPDATE documents SET pipeline_version=3 WHERE sha256=?",
+            (pdf_first.sha256,),
+        )
+        pipeline.db.conn.commit()
+
+        text_second = pipeline.process_file(text_path)
+        pdf_second = pipeline.process_file(pdf_path)
+
+        assert text_second.status == "skipped"
+        assert pdf_second.status == "processed"
+    finally:
+        pipeline.close()
+
+
+def test_translation_quality_score_penalizes_ukrainian_residue_for_ru():
+    import osint_local.fast_translation as fast
+
+    source = "Освітня програма вводиться в дію з 01.09.2026 р."
+    untranslated = "Освітня програма вводиться в дію з 01.09.2026 р."
+    translated = "Образовательная программа вводится в действие с 01.09.2026 г."
+
+    assert fast._translation_quality_score(
+        untranslated,
+        translated,
+        target_lang="ru",
+    ) == 0
+    assert fast._translation_quality_score(
+        source,
+        untranslated,
+        target_lang="ru",
+    ) >= 2
