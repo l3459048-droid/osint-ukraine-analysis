@@ -273,7 +273,16 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 <div class="ask-filter-note">Auto mode keeps OPUS as the fast path. The Quality model is loaded lazily only after the quality gate rejects a segment. Protected dates, numbers, URLs and codes are restored exactly before scoring.</div>
 </section>"""
 
-def _translation_panel(csrf_token: str, sha256: str, translations, *, available: bool, pairs: set[tuple[str, str]], action: dict) -> str:
+def _translation_panel(
+    csrf_token: str,
+    sha256: str,
+    translations,
+    *,
+    available: bool,
+    pairs: set[tuple[str, str]],
+    quality_ready: bool,
+    action: dict,
+) -> str:
     running_here = (
         action.get("status") == "running"
         and action.get("kind") == "translate"
@@ -285,6 +294,15 @@ def _translation_panel(csrf_token: str, sha256: str, translations, *, available:
     source_options = "".join(
         f'<option value="{code}"{" selected" if code == "auto" else ""}>{label}</option>'
         for code, label in (("auto", "Auto"), ("en", "English"), ("uk", "Ukrainian"))
+    )
+    default_engine = "quality" if quality_ready else "auto"
+    engine_options = "".join(
+        f'<option value="{code}"{" selected" if code == default_engine else ""}>{label}</option>'
+        for code, label in (
+            ("auto", "Auto · Fast + quality gate"),
+            ("quality", "Quality · M2M100 418M"),
+            ("fast", "Fast · OPUS"),
+        )
     )
     rows = []
     for row in translations:
@@ -305,8 +323,11 @@ def _translation_panel(csrf_token: str, sha256: str, translations, *, available:
 <form class="translation-form" action="/actions/translate" method="post">
 <input type="hidden" name="csrf" value="{_e(csrf_token)}"><input type="hidden" name="sha256" value="{_e(sha256)}"><input type="hidden" name="target_lang" value="ru">
 <label>From<select name="source_lang">{source_options}</select></label><span class="translation-arrow">→</span>
-<label>To<span class="fixed-target">Russian</span></label><button type="submit"{disabled}>Translate</button>
+<label>To<span class="fixed-target">Russian</span></label>
+<label>Engine<select name="engine">{engine_options}</select></label>
+<button type="submit"{disabled}>Translate</button>
 </form>
+<div class="ask-filter-note">For important documents choose Quality. Auto keeps OPUS fast and invokes Quality only when the quality gate detects a problem. Protected dates, numbers, URLs and neutral codes remain exact.</div>
 <div class="translation-status">{_e(status)}</div>
 <div class="translation-list">{saved}</div>
 </section>"""
