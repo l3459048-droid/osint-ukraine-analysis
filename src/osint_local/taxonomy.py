@@ -246,7 +246,7 @@ def build_adaptive_taxonomy(
                 "dimension": len(item["vector"]),
                 "document_count": item["document_count"],
                 "topic_count": len(item["topic_keys"]),
-                "source": "discovered",
+                "source": item.get("label_source", "discovered"),
             }
             for item in category_records
         ]
@@ -260,7 +260,7 @@ def build_adaptive_taxonomy(
                 "centroid": _vector_to_blob(item["vector"]),
                 "dimension": len(item["vector"]),
                 "document_count": item["document_count"],
-                "source": "discovered",
+                "source": item.get("label_source", "discovered"),
             }
             for item in topic_records
         ]
@@ -309,6 +309,28 @@ def build_adaptive_taxonomy(
             topic_assignments=topic_assignments,
             details_json=json.dumps(details, ensure_ascii=False),
         )
+        for item in topic_records:
+            old_key = str(item.get("manual_override_source_key") or "")
+            if old_key:
+                db.rekey_taxonomy_label_override(
+                    kind="topic",
+                    old_key=old_key,
+                    new_key=item["key"],
+                    centroid=_vector_to_blob(item["vector"]),
+                    dimension=len(item["vector"]),
+                    updated_at=finished_at,
+                )
+        for item in category_records:
+            old_key = str(item.get("manual_override_source_key") or "")
+            if old_key:
+                db.rekey_taxonomy_label_override(
+                    kind="category",
+                    old_key=old_key,
+                    new_key=item["key"],
+                    centroid=_vector_to_blob(item["vector"]),
+                    dimension=len(item["vector"]),
+                    updated_at=finished_at,
+                )
         if progress:
             progress(6, 6, "Adaptive taxonomy ready")
         return {
@@ -1060,7 +1082,9 @@ def _apply_manual_overrides(
             if index in used:
                 continue
             score = _dot(candidate["vector"], override["vector"])
-            if score >= best_score:
+            if score > best_score or (
+                best_index < 0 and score >= best_score
+            ):
                 best_score = score
                 best_index = index
         if best_index < 0:
