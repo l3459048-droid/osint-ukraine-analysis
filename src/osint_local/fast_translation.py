@@ -25,6 +25,7 @@ FAST_SOURCE_EOS_TOKEN = "</s>"
 FAST_RETRY_BEAM_SIZE = 8
 FAST_RETRY_REPETITION_PENALTY = 1.12
 FAST_RETRY_NO_REPEAT_NGRAM_SIZE = 3
+FAST_TRANSLATION_PIPELINE_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -818,12 +819,19 @@ def _load_checkpoint(
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    expected = (sha256, source_lang, target_lang, model_id)
+    expected = (
+        sha256,
+        source_lang,
+        target_lang,
+        model_id,
+        FAST_TRANSLATION_PIPELINE_VERSION,
+    )
     actual = (
         data.get("document_sha256"),
         data.get("source_lang"),
         data.get("target_lang"),
         data.get("model"),
+        data.get("pipeline_version"),
     )
     return data if actual == expected else {}
 
@@ -844,6 +852,7 @@ def _save_checkpoint(
         "target_lang": target_lang,
         "engine": "ctranslate2-int8",
         "model": model_id,
+        "pipeline_version": FAST_TRANSLATION_PIPELINE_VERSION,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "sections": [
             {"index": index, "page": page, "text": text}
