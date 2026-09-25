@@ -23,6 +23,11 @@ from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_p
 from .desktop import open_folder, pick_folder
 from .fast_translation import fast_ready_pairs, fast_translation_available, prepare_fast_model
 from .pipeline import LocalPipeline
+from .quality_translation import (
+    prepare_quality_model,
+    quality_model_ready,
+    quality_translation_available,
+)
 from .qa import ASK_MODES, ask_documents, ollama_models
 from .reader import load_reader
 from .search import search_chunks
@@ -517,6 +522,89 @@ class FastSetupManager:
             )
 
 
+class QualitySetupManager:
+    """Prepare the shared M2M100 Quality Translation model."""
+
+    def __init__(self, pipeline: LocalPipeline, gate: InteractiveGate | None = None) -> None:
+        self.pipeline = pipeline
+        self.gate = gate
+        self._lock = threading.RLock()
+        self._state = {
+            "kind": "quality-translation-setup",
+            "status": "idle",
+            "current": 0,
+            "total": 0,
+            "message": "Ready",
+            "error": "",
+            "result": None,
+        }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._state)
+
+    def start(self) -> dict:
+        with self._lock:
+            if self._state.get("status") == "running":
+                raise ActionBusyError("Quality Translation setup is already running")
+            self._state = {
+                "kind": "quality-translation-setup",
+                "status": "running",
+                "current": 0,
+                "total": 0,
+                "message": "Preparing Quality Translation · M2M100 418M…",
+                "error": "",
+                "result": None,
+            }
+            initial = dict(self._state)
+            if self.gate is not None:
+                self.gate.acquire()
+            threading.Thread(
+                target=self._worker_guarded,
+                name="osint-local-quality-setup",
+                daemon=True,
+            ).start()
+            return initial
+
+    def _progress(self, current: int, total: int, message: str) -> None:
+        with self._lock:
+            if self._state.get("status") == "running":
+                self._state["current"] = max(0, int(current))
+                self._state["total"] = max(0, int(total))
+                self._state["message"] = str(message)
+
+    def _worker_guarded(self) -> None:
+        try:
+            self._worker()
+        finally:
+            if self.gate is not None:
+                self.gate.release()
+
+    def _worker(self) -> None:
+        try:
+            result = prepare_quality_model(
+                self.pipeline.settings,
+                progress=self._progress,
+                run_benchmark=True,
+            )
+        except Exception as exc:
+            with self._lock:
+                self._state.update(
+                    status="failed",
+                    message="Quality Translation setup failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                    result=None,
+                )
+            return
+        with self._lock:
+            self._state.update(
+                status="succeeded",
+                message="Quality Translation ready",
+                error="",
+                result=result,
+            )
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -530,6 +618,7 @@ class DashboardServer(ThreadingHTTPServer):
         self.chat = ChatManager(pipeline, self.interactive)
         self.translation = ManualTranslationManager(pipeline, self.interactive)
         self.fast_setup = FastSetupManager(pipeline, self.interactive)
+        self.quality_setup = QualitySetupManager(pipeline, self.interactive)
         self.csrf_token = secrets.token_urlsafe(32)
         self.folder_opener = folder_opener
         self.folder_picker = folder_picker
@@ -616,6 +705,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._translate_action()
             elif path == "/actions/prepare-fast-translation":
                 self._prepare_fast_translation_action()
+            elif path == "/actions/prepare-quality-translation":
+                self._prepare_quality_translation_action()
             elif path == "/api/ask":
                 self._start_ask_action()
             elif path == "/api/chat":
@@ -944,6 +1035,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "action": self.server.actions.snapshot(),
             "translation": self.server.translation.snapshot(),
             "fast_setup": self.server.fast_setup.snapshot(),
+            "quality_setup": self.server.quality_setup.snapshot(),
+            "quality_model_ready": quality_model_ready(self.settings),
+            "quality_translation_available": quality_translation_available(),
         }
 
     def _activity_payload(self) -> dict:
@@ -951,6 +1045,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "action": self.server.actions.snapshot(),
             "translation": self.server.translation.snapshot(),
             "fast_setup": self.server.fast_setup.snapshot(),
+            "quality_setup": self.server.quality_setup.snapshot(),
             "stats": self._stats_payload(),
             "errors": self.db.recent_errors(limit=6),
         }
@@ -1198,6 +1293,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         self._action_response({"action": setup, "fast_setup": setup}, status=HTTPStatus.ACCEPTED)
+
+    def _prepare_quality_translation_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response(
+                {"error": "Invalid action token. Refresh the page and try again."},
+                status=HTTPStatus.FORBIDDEN,
+            )
+            return
+        if not quality_translation_available():
+            self._action_response(
+                {"error": "Quality Translation dependencies are missing. Run UPDATE_OSINT.cmd."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            setup = self.server.quality_setup.start()
+        except ActionBusyError as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self._action_response(
+            {"action": setup, "quality_setup": setup},
+            status=HTTPStatus.ACCEPTED,
+        )
 
     def _set_performance_action(self) -> None:
         data = self._form_data()
