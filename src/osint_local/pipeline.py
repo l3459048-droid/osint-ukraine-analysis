@@ -11,7 +11,7 @@ from typing import Callable
 from .chunking import build_chunks
 from .classifier import classify
 from .config import Settings
-from .db import Database
+from .db import Database, PIPELINE_VERSION
 from .extractors import extract
 from .translation import detect_language
 
@@ -73,7 +73,7 @@ class LocalPipeline:
         if (
             existing
             and existing["status"] == "done"
-            and int(existing["pipeline_version"] or 1) >= 2
+            and int(existing["pipeline_version"] or 1) >= PIPELINE_VERSION
             and not force
         ):
             return ProcessResult(path, "duplicate", sha256, "content already processed")
