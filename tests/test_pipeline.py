@@ -2154,3 +2154,116 @@ def test_pdf_text_normalization_removes_hidden_unicode_only():
 
     value = "Ізмаїл\u00a0–\u200b 2026\u00ad р. № 1"
     assert _normalize_pdf_text(value) == "Ізмаїл – 2026 р. № 1"
+
+
+
+def test_pdf_layout_extraction_reconstructs_same_row_fields():
+    from osint_local.extractors import _layout_pdf_page_text
+
+    class FakePage:
+        def get_text(self, option, **kwargs):
+            assert option == "dict"
+            return {
+                "blocks": [
+                    {
+                        "type": 0,
+                        "lines": [
+                            {
+                                "bbox": (50, 100, 210, 112),
+                                "spans": [{"text": "Тип освітньої програми:"}],
+                            },
+                            {
+                                "bbox": (50, 124, 180, 136),
+                                "spans": [{"text": "Назва програми:"}],
+                            },
+                        ],
+                    },
+                    {
+                        "type": 0,
+                        "lines": [
+                            {
+                                "bbox": (280, 100, 470, 112),
+                                "spans": [{"text": "освітньо-професійна програма"}],
+                            },
+                            {
+                                "bbox": (280, 124, 410, 136),
+                                "spans": [{"text": "Туризм та рекреація"}],
+                            },
+                        ],
+                    },
+                ]
+            }
+
+    text, meta = _layout_pdf_page_text(FakePage())
+
+    assert text.splitlines() == [
+        "Тип освітньої програми:    освітньо-професійна програма",
+        "Назва програми:    Туризм та рекреація",
+    ]
+    assert meta["layout_lines"] == 4
+    assert meta["layout_rows"] == 2
+    assert meta["multi_part_rows"] == 2
+
+
+def test_translation_quality_score_penalizes_missing_facts_and_mixed_scripts():
+    import osint_local.fast_translation as fast
+
+    source = "Освітня програма вводиться в дію з 01.09.2026 р. Спеціальність J3."
+    clean = "Образовательная программа вводится в действие с 01.09.2026 г. Специальность J3."
+    bad = "programma вводится в действие 2026 specJтекст foo_ bar_ baz_"
+
+    assert fast._translation_quality_score(source, clean, target_lang="ru") == 0
+    assert fast._translation_quality_score(source, bad, target_lang="ru") >= 4
+
+
+def test_fast_translation_quality_gate_can_choose_local_fallback():
+    import osint_local.fast_translation as fast
+
+    class FakeSentencePiece:
+        def encode(self, text, out_type=str):
+            return text.split()
+
+    engine = object.__new__(fast.FastTranslator)
+    engine.source_sp = FakeSentencePiece()
+    engine.target_lang = "ru"
+    engine.max_input_tokens = 220
+    engine.segment_tokens = 120
+    engine.quality_retry_score = 2
+    engine.quality_fallback_score = 4
+    engine.quality_retries = 0
+    engine.quality_fallbacks = 0
+    engine.quality_warnings = 0
+
+    def fake_translate_windows(tokenized, retry=False):
+        return ["programma xx_ yy_ zz_ 2026"] * len(tokenized)
+
+    engine._translate_windows = fake_translate_windows
+    source = "Освітня програма вводиться в дію з 01.09.2026 р."
+    expected = "Образовательная программа вводится в действие с 01.09.2026 г."
+
+    result = engine.translate_texts(
+        [source],
+        fallback_translator=lambda value: expected,
+    )
+
+    assert result == [expected]
+    assert engine.quality_retries == 1
+    assert engine.quality_fallbacks == 1
+    assert engine.quality_warnings == 0
+
+
+def test_fast_translation_paragraphs_keep_pdf_form_fields_separate():
+    import osint_local.fast_translation as fast
+
+    text = (
+        "Ректор __________________ Ярослав КІЧУК\n"
+        "протокол № __ від «__» ______ 2026 р.\n"
+        "Формування загальних і фахових компетентностей для успішного здійснення професійної\n"
+        "діяльності у сфері туризму та рекреації."
+    )
+    parts = fast._paragraphs(text)
+
+    assert parts[0].startswith("Ректор ")
+    assert parts[1].startswith("протокол №")
+    assert "Формування загальних" in parts[2]
+    assert "діяльності у сфері" in parts[2]
