@@ -976,7 +976,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     or fast_translation_available()
                     or quality_translation_available()
                 ),
-                pairs=(installed_pairs() if argos_available() else set()) | (
+                pairs=(
+                    {("en", "ru"), ("uk", "ru")} if argos_available() else set()
+                ) | (
                     fast_ready_pairs(self.settings) if fast_translation_available() else set()
                 ) | (
                     {("en", "ru"), ("uk", "ru")}
