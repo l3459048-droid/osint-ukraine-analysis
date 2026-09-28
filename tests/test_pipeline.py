@@ -6029,3 +6029,112 @@ def test_taxonomy_quality_v2_requests_rebuild_for_legacy_taxonomy(tmp_path: Path
     finally:
         pipeline.close()
 
+def test_quality_model_ready_requires_successful_validation_marker(tmp_path: Path):
+    import osint_local.quality_translation as quality
+
+    settings = load_settings(make_config(tmp_path))
+    model_dir = quality.quality_model_dir(settings)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for name in (*quality.QUALITY_MODEL_FILES, *quality.QUALITY_TOKENIZER_FILES):
+        (model_dir / name).write_bytes(b"test")
+
+    assert quality.quality_model_ready(settings) is False
+
+    (model_dir / quality.QUALITY_VALIDATION_FILE).write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "model": quality.QUALITY_MODEL_ID,
+                "compute_type": "int8",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert quality.quality_model_ready(settings) is True
+
+
+def test_prepare_quality_keeps_valid_model_ready_when_benchmark_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import osint_local.quality_translation as quality
+
+    settings = load_settings(make_config(tmp_path))
+    model_dir = quality.quality_model_dir(settings)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for name in (*quality.QUALITY_MODEL_FILES, *quality.QUALITY_TOKENIZER_FILES):
+        (model_dir / name).write_bytes(b"test")
+    (model_dir / quality.QUALITY_VALIDATION_FILE).write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "model": quality.QUALITY_MODEL_ID,
+                "compute_type": "int8",
+                "sample_output": "Привет, мир.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quality, "quality_translation_available", lambda: True)
+
+    def fail_benchmark(_settings):
+        raise RuntimeError("benchmark unavailable")
+
+    monkeypatch.setattr(quality, "benchmark_quality_translation", fail_benchmark)
+
+    messages = []
+    result = quality.prepare_quality_model(
+        settings,
+        progress=lambda current, total, message: messages.append(message),
+        run_benchmark=True,
+    )
+
+    assert result["ready"] is True
+    assert "benchmark unavailable" in result["benchmark_error"]
+    assert quality.quality_model_ready(settings) is True
+    assert messages[-1] == "Quality Translation ready"
+
+
+def test_translation_panel_only_offers_layout_pdf_when_layout_artifact_exists(
+    tmp_path: Path,
+):
+    from osint_local.web_ui import _translation_panel
+
+    markdown = tmp_path / "sample.ru.md"
+    markdown.write_text("translation", encoding="utf-8")
+    row = {
+        "target_lang": "ru",
+        "source_lang": "en",
+        "output_path": str(markdown),
+        "engine": "ctranslate2-int8",
+        "created_at": "2026-09-28T00:00:00+00:00",
+    }
+
+    body = _translation_panel(
+        "csrf",
+        "a" * 64,
+        [row],
+        available=True,
+        pairs={("en", "ru")},
+        quality_ready=True,
+        source_extension=".pdf",
+        action={},
+    )
+    assert "PDF · layout: run this document with Quality first" in body
+    assert "/pdf-layout" not in body
+
+    markdown.with_suffix(".layout.json").write_text("{}", encoding="utf-8")
+    body = _translation_panel(
+        "csrf",
+        "a" * 64,
+        [row],
+        available=True,
+        pairs={("en", "ru")},
+        quality_ready=True,
+        source_extension=".pdf",
+        action={},
+    )
+    assert "PDF · layout</a>" in body
+    assert "/pdf-layout" in body
+
