@@ -100,6 +100,20 @@ def build_adaptive_taxonomy(
     if embedding_count <= 0:
         raise RuntimeError("Adaptive taxonomy requires a semantic index")
 
+    previous_run = db.latest_taxonomy_run()
+    previous_quality_version = 0
+    if previous_run is not None:
+        try:
+            previous_details = json.loads(str(previous_run["details_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            previous_details = {}
+        previous_quality_version = int(
+            previous_details.get("taxonomy_quality_version") or 0
+        )
+    reuse_previous_automatic_labels = (
+        previous_quality_version == TAXONOMY_QUALITY_VERSION
+    )
+
     started_at = _now()
     run_id = db.begin_taxonomy_run(
         started_at=started_at,
@@ -175,7 +189,11 @@ def build_adaptive_taxonomy(
 
         if progress:
             progress(2, 6, "Naming discovered topics…")
-        previous_topics = db.list_taxonomy_topics(limit=5000)
+        previous_topics = (
+            db.list_taxonomy_topics(limit=5000)
+            if reuse_previous_automatic_labels
+            else []
+        )
         topic_overrides = db.list_taxonomy_label_overrides(
             kind="topic",
             limit=5000,
@@ -227,7 +245,11 @@ def build_adaptive_taxonomy(
             merge_threshold=category_merge,
             weighted=True,
         )
-        previous_categories = db.list_taxonomy_categories(limit=1000)
+        previous_categories = (
+            db.list_taxonomy_categories(limit=1000)
+            if reuse_previous_automatic_labels
+            else []
+        )
         category_overrides = db.list_taxonomy_label_overrides(
             kind="category",
             limit=1000,
