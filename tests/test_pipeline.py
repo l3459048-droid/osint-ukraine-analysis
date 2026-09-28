@@ -5957,6 +5957,7 @@ def test_taxonomy_quality_v2_penalizes_overbroad_topic_assignment():
             "topic_secondary_margin": 0.18,
             "broad_topic_ratio_start": 0.25,
             "broad_topic_assignment_penalty": 0.10,
+            "broad_topic_penalty_min_documents": 1,
             "max_topics_per_document": 4,
         },
     )
