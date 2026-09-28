@@ -452,10 +452,12 @@ def _extract_entities(
     context_chars: int,
 ) -> list[dict[str, Any]]:
     items = []
+    person_spans: list[tuple[int, int]] = []
 
     for match in PERSON_ALLCAPS_RE.finditer(text):
         name = _clean_entity(match.group("name"))
         if _valid_person(name):
+            person_spans.append((match.start("name"), match.end("name")))
             items.append(
                 _item(
                     text,
@@ -477,6 +479,7 @@ def _extract_entities(
     for match in PERSON_PATRONYMIC_RE.finditer(text):
         name = _clean_entity(match.group("name"))
         if _valid_patronymic_person(name):
+            person_spans.append((match.start("name"), match.end("name")))
             items.append(
                 _item(
                     text,
@@ -498,6 +501,18 @@ def _extract_entities(
     for match in ACRONYM_RE.finditer(text):
         value = match.group("value").strip()
         if value.casefold().upper() in ACRONYM_STOP:
+            continue
+        if any(
+            match.start("value") >= start and match.end("value") <= end
+            for start, end in person_spans
+        ):
+            continue
+        cyrillic_only = all(
+            ("А" <= char <= "Я") or char in "ЁІЇЄҐ"
+            for char in value
+            if char.isalpha()
+        )
+        if cyrillic_only and len(value.replace("-", "")) > 4:
             continue
         items.append(
             _item(
