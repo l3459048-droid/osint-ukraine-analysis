@@ -15,7 +15,7 @@ def _layout(title: str, body: str) -> str:
 </head>
 <body>
 <header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.20</span></a><nav>
-<a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/taxonomy">Corpus</a><a href="/system">System</a><a href="/settings">Settings</a>
+<a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
 <footer>Local-first · source files stay on this computer</footer>
@@ -756,6 +756,121 @@ def _taxonomy_selection_detail(
 </form>
 </details>
 </section>"""
+
+
+def _analysis_panel(
+    csrf_token: str,
+    *,
+    counts: dict,
+    latest_run,
+    top_values: dict,
+    evidence,
+    action: dict,
+    selected_kind: str = "",
+    selected_value: str = "",
+    stale: bool = False,
+) -> str:
+    running = (
+        action.get("status") == "running"
+        and action.get("kind") in {"analysis", "maintenance"}
+    )
+    disabled = " disabled" if running else ""
+    latest_text = (
+        str(latest_run["finished_at"] or latest_run["started_at"] or "")
+        if latest_run else "Not built yet"
+    )
+    status = action.get("message") if running else (
+        ("Evidence refresh needed" if stale else f"Current · {latest_text}")
+        if latest_run else "Run corpus analysis to extract evidence."
+    )
+
+    kinds = [
+        ("", "All"),
+        ("date", "Dates"),
+        ("entity", "Entities"),
+        ("metric", "Metrics"),
+    ]
+    filters = "".join(
+        f'<a class="chip{" active" if selected_kind == key else ""}" '
+        f'href="/analysis{("?" + urlencode({"kind": key})) if key else ""}">{_e(label)}</a>'
+        for key, label in kinds
+    )
+
+    top_sections = []
+    for kind, label in (("date", "Dates"), ("entity", "Entities"), ("metric", "Metrics")):
+        rows = top_values.get(kind) or []
+        chips = "".join(
+            f'<a class="badge" href="/analysis?{urlencode({"kind": kind, "value": row["normalized_value"]})}">'
+            f'{_e(row["sample_value"])} <b>{int(row["documents"])}d/{int(row["mentions"])}m</b></a>'
+            for row in rows[:16]
+        ) or '<span class="translation-empty">No evidence yet.</span>'
+        top_sections.append(
+            f'<div><h3>{_e(label)}</h3><div class="badges">{chips}</div></div>'
+        )
+
+    selected_note = (
+        f'<div class="ask-filter-note">Filtered value: <strong>{_e(selected_value)}</strong></div>'
+        if selected_value else ""
+    )
+    evidence_html = _evidence_cards(evidence) if evidence else (
+        '<div class="empty">No evidence in this view.</div>'
+    )
+
+    return f"""<section class="stats-grid">
+{_stat_card("Evidence", counts.get("total", 0))}
+{_stat_card("Documents", counts.get("documents", 0))}
+{_stat_card("Dates", counts.get("date", 0))}
+{_stat_card("Entities", counts.get("entity", 0))}
+{_stat_card("Metrics", counts.get("metric", 0))}
+</section>
+<section class="panel">
+<div class="panel-head"><div><h2>Corpus Analysis</h2><span class="panel-subtle">{_e(status)}</span></div>
+<form action="/actions/analysis" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{disabled}>Analyze corpus</button></form></div>
+<div class="ask-filter-note">Deterministic evidence extraction preserves provenance: document → page → chunk → local character offsets. It does not re-run OCR or translation.</div>
+<div class="filters">{filters}</div>{selected_note}
+</section>
+<section class="panel"><div class="panel-head"><h2>Top evidence</h2><span class="panel-subtle">Documents / mentions</span></div>
+<div class="two-col">{"".join(top_sections)}</div></section>
+<section class="panel"><div class="panel-head"><h2>Evidence occurrences</h2><span class="panel-subtle">{len(evidence)} shown</span></div>{evidence_html}</section>"""
+
+
+def _evidence_cards(rows) -> str:
+    cards = []
+    for row in rows:
+        page = row["page"]
+        chunk_index = int(row["chunk_index"] or 0)
+        if page is not None:
+            target = f'/documents/{row["document_sha256"]}?page={int(page)}#reader'
+            location = f'{row["source_path"]} · page {int(page)}'
+        else:
+            target = f'/documents/{row["document_sha256"]}#chunk-{chunk_index}'
+            location = f'{row["source_path"]} · chunk {chunk_index}'
+        cards.append(
+            f'<article class="result">'
+            f'<div class="result-meta"><span class="score">{float(row["confidence"]):.2f}</span>'
+            f'<span>{_e(row["kind"])}/{_e(row["subtype"])}</span><span>{_e(location)}</span></div>'
+            f'<h3><a href="{target}">{_e(row["value"])}</a></h3>'
+            f'<p>{_e(row["context"])}</p>'
+            f'<div class="result-actions"><a href="{target}">Open evidence</a>'
+            f'<a href="/analysis?{urlencode({"kind": row["kind"], "value": row["normalized_value"]})}">Same value</a></div>'
+            f'</article>'
+        )
+    return '<section class="results">' + "".join(cards) + "</section>"
+
+
+def _document_evidence_panel(rows) -> str:
+    if not rows:
+        return '<div class="empty">No extracted evidence for this document yet.</div>'
+    badges = []
+    for row in rows[:40]:
+        page = row["page"]
+        label = str(row["value"])
+        suffix = f" · p.{int(page)}" if page is not None else ""
+        badges.append(
+            f'<a class="badge" href="/analysis?{urlencode({"kind": row["kind"], "value": row["normalized_value"]})}">'
+            f'{_e(label)}{_e(suffix)}</a>'
+        )
+    return '<div class="badges">' + "".join(badges) + "</div>"
 
 
 def _taxonomy_document_cards(rows) -> str:
