@@ -358,6 +358,19 @@ class Database:
         classifications: list[tuple[str, int]], chunks: list
     ) -> None:
         with self._lock:
+            current = self.conn.execute(
+                "SELECT source_path FROM documents WHERE sha256=?",
+                (sha256,),
+            ).fetchone()
+            if current:
+                # A source path represents the current file in the local library.
+                # Keep the previous working version until the replacement has
+                # extracted successfully, then remove stale SHA rows atomically.
+                self.conn.execute(
+                    """DELETE FROM documents
+                       WHERE source_path=? AND sha256<>?""",
+                    (current["source_path"], sha256),
+                )
             self.conn.execute(
                 """UPDATE documents SET status='done', extraction_method=?, text_chars=?,
                    processed_at=?, error=NULL, metadata_json=?, language=?, pipeline_version=? WHERE sha256=?""",
