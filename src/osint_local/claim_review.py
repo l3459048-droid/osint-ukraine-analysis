@@ -206,11 +206,8 @@ def review_claim_candidates(
         "reviewed": len(reviewed),
         "reviewed_ids": reviewed,
         "failed": failed,
-        "remaining": len(
-            db.unreviewed_claims(
-                limit=500,
-                min_confidence=min_confidence,
-            )
+        "remaining": db.unreviewed_claim_count(
+            min_confidence=min_confidence,
         ),
     }
 
