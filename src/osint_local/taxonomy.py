@@ -676,9 +676,22 @@ def _document_vectors(
     db,
     model: str,
     *,
+    taxonomy_config: dict | None = None,
     should_pause: Callable[[], bool] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict[str, Any]]:
+    taxonomy_config = taxonomy_config or {}
+    representative_limit = max(
+        1,
+        int(taxonomy_config.get("document_representatives", 4) or 4),
+    )
+    pool_limit = max(
+        representative_limit,
+        int(taxonomy_config.get("document_representative_pool", 16) or 16),
+    )
+    novelty_threshold = float(
+        taxonomy_config.get("document_representative_novelty", 0.90)
+    )
     aggregates: dict[str, dict[str, Any]] = {}
 
     for batch in db.embedding_batches(model, batch_size=500):
@@ -687,6 +700,7 @@ def _document_vectors(
             vector = _blob_to_vector(row["vector"])
             if not vector:
                 continue
+            vector = _normalize(vector)
 
             sha256 = str(row["document_sha256"])
             state = aggregates.get(sha256)
@@ -694,14 +708,12 @@ def _document_vectors(
                 state = {
                     "sum": [0.0] * len(vector),
                     "count": 0,
-                    "texts": [],
                     "source_path": str(row["source_path"] or ""),
+                    "representative_pool": [],
                 }
                 aggregates[sha256] = state
 
             if len(state["sum"]) != len(vector):
-                # Ignore a malformed/mixed-dimension row without poisoning the
-                # entire document centroid.
                 continue
 
             for index, value in enumerate(vector):
@@ -709,8 +721,19 @@ def _document_vectors(
             state["count"] += 1
 
             text = str(row["text"] or "").strip()
-            if text and len(state["texts"]) < 5:
-                state["texts"].append(text[:1200])
+            candidate = {
+                "id": int(row["chunk_id"]),
+                "vector": vector,
+                "text": text[:1600],
+                "page": row["page"],
+                "chunk_index": int(row["chunk_index"] or 0),
+            }
+            _update_representative_pool(
+                state["representative_pool"],
+                candidate,
+                pool_limit=pool_limit,
+                novelty_threshold=novelty_threshold,
+            )
 
     documents: list[dict[str, Any]] = []
     for sha256 in sorted(aggregates):
@@ -721,16 +744,234 @@ def _document_vectors(
         centroid = _normalize(
             [value / count for value in state["sum"]]
         )
+        representatives = _select_representatives(
+            state["representative_pool"],
+            centroid,
+            limit=representative_limit,
+        )
         documents.append(
             {
                 "id": sha256,
                 "vector": centroid,
                 "weight": 1,
                 "source_path": state["source_path"],
-                "text": "\n".join(state["texts"]),
+                "text": "\n".join(
+                    item["text"]
+                    for item in representatives
+                    if item.get("text")
+                ),
+                "representatives": representatives,
             }
         )
     return documents
+
+
+def _update_representative_pool(
+    pool: list[dict[str, Any]],
+    candidate: dict[str, Any],
+    *,
+    pool_limit: int,
+    novelty_threshold: float,
+) -> None:
+    if not pool:
+        pool.append(candidate)
+        return
+
+    nearest_similarity = max(
+        _dot(candidate["vector"], item["vector"])
+        for item in pool
+    )
+    if len(pool) < pool_limit:
+        if nearest_similarity < novelty_threshold or len(pool) < max(3, pool_limit // 3):
+            pool.append(candidate)
+        return
+
+    if nearest_similarity >= novelty_threshold:
+        return
+
+    most_redundant_index = 0
+    most_redundant_score = -1.0
+    for index, item in enumerate(pool):
+        other_scores = [
+            _dot(item["vector"], other["vector"])
+            for other_index, other in enumerate(pool)
+            if other_index != index
+        ]
+        score = max(other_scores) if other_scores else -1.0
+        if score > most_redundant_score:
+            most_redundant_score = score
+            most_redundant_index = index
+
+    if nearest_similarity < most_redundant_score:
+        pool[most_redundant_index] = candidate
+
+
+def _select_representatives(
+    pool: list[dict[str, Any]],
+    centroid: Sequence[float],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not pool:
+        return []
+
+    remaining = list(pool)
+    first = max(
+        remaining,
+        key=lambda item: _dot(item["vector"], centroid),
+    )
+    selected = [first]
+    remaining.remove(first)
+
+    while remaining and len(selected) < limit:
+        next_item = min(
+            remaining,
+            key=lambda item: max(
+                _dot(item["vector"], chosen["vector"])
+                for chosen in selected
+            ),
+        )
+        selected.append(next_item)
+        remaining.remove(next_item)
+
+    return sorted(
+        selected,
+        key=lambda item: (
+            int(item.get("chunk_index") or 0),
+            int(item.get("id") or 0),
+        ),
+    )
+
+
+def _topic_discovery_items(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for document in documents:
+        document_id = str(document["id"])
+        representatives = document.get("representatives") or []
+        if not representatives:
+            representatives = [
+                {
+                    "id": 0,
+                    "vector": document["vector"],
+                    "text": document.get("text", ""),
+                    "page": None,
+                    "chunk_index": 0,
+                }
+            ]
+        for index, representative in enumerate(representatives):
+            items.append(
+                {
+                    "id": f"{document_id}:facet:{index}:{representative.get('id', 0)}",
+                    "document_id": document_id,
+                    "vector": list(representative["vector"]),
+                    "weight": 1,
+                    "text": str(representative.get("text") or document.get("text") or ""),
+                    "source_path": document.get("source_path", ""),
+                    "page": representative.get("page"),
+                    "chunk_index": representative.get("chunk_index"),
+                }
+            )
+    return items
+
+
+def _cluster_document_ids(cluster: dict[str, Any]) -> set[str]:
+    return {
+        str(member.get("document_id") or member["id"])
+        for member in cluster.get("members", [])
+    }
+
+
+def _cluster_document_count(cluster: dict[str, Any]) -> int:
+    return len(_cluster_document_ids(cluster))
+
+
+def _cluster_cohesion(cluster: dict[str, Any]) -> float:
+    members = cluster.get("members") or []
+    if not members:
+        return 0.0
+    return sum(
+        max(0.0, _dot(member["vector"], cluster["vector"]))
+        for member in members
+    ) / len(members)
+
+
+def _refine_topic_clusters(
+    clusters: list[dict[str, Any]],
+    *,
+    total_documents: int,
+    similarity_threshold: float,
+    merge_threshold: float,
+    taxonomy_config: dict,
+) -> list[dict[str, Any]]:
+    min_cohesion = float(taxonomy_config.get("topic_min_cohesion", 0.72))
+    max_ratio = float(taxonomy_config.get("topic_max_document_ratio", 0.45))
+    boost = max(
+        0.01,
+        float(taxonomy_config.get("topic_recluster_similarity_boost", 0.08)),
+    )
+
+    current = list(clusters)
+    for round_index in range(2):
+        refined: list[dict[str, Any]] = []
+        changed = False
+        for cluster in current:
+            document_ratio = _cluster_document_count(cluster) / max(1, total_documents)
+            cohesion = _cluster_cohesion(cluster)
+            should_split = (
+                len(cluster.get("members") or []) >= 4
+                and (document_ratio > max_ratio or cohesion < min_cohesion)
+            )
+            if not should_split:
+                refined.append(cluster)
+                continue
+
+            threshold = min(0.96, similarity_threshold + boost * (round_index + 1))
+            merge = min(0.98, merge_threshold + boost * (round_index + 1))
+            split = _cluster_items(
+                list(cluster["members"]),
+                similarity_threshold=threshold,
+                merge_threshold=merge,
+                max_clusters=0,
+            )
+            if len(split) > 1:
+                refined.extend(split)
+                changed = True
+            else:
+                refined.append(cluster)
+        current = refined
+        if not changed:
+            break
+
+    return current
+
+
+def _soft_cap_clusters(
+    clusters: list[dict[str, Any]],
+    *,
+    max_clusters: int,
+    merge_threshold: float,
+    weighted: bool = False,
+) -> list[dict[str, Any]]:
+    if max_clusters <= 0 or len(clusters) <= max_clusters:
+        return clusters
+
+    result = list(clusters)
+    while len(result) > max_clusters:
+        best_pair: tuple[int, int] | None = None
+        best_score = merge_threshold
+        for left in range(len(result)):
+            for right in range(left + 1, len(result)):
+                score = _dot(result[left]["vector"], result[right]["vector"])
+                if score >= best_score:
+                    best_score = score
+                    best_pair = (left, right)
+        if best_pair is None:
+            break
+        left, right = best_pair
+        result[left]["members"].extend(result[right]["members"])
+        _refresh_cluster(result[left], weighted=weighted)
+        del result[right]
+    return result
 
 
 def _cluster_items(
@@ -750,10 +991,7 @@ def _cluster_items(
             if score > best_score:
                 best_score = score
                 best_index = index
-        if best_index >= 0 and (
-            best_score >= similarity_threshold
-            or len(clusters) >= max_clusters
-        ):
+        if best_index >= 0 and best_score >= similarity_threshold:
             clusters[best_index]["members"].append(item)
             _refresh_cluster(clusters[best_index], weighted=weighted)
         else:
