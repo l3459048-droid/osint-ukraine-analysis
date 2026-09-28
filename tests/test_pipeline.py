@@ -4692,3 +4692,117 @@ def test_corpus_analysis_replaces_old_evidence_transactionally(tmp_path: Path):
         assert values == {"2027-10-02"}
     finally:
         pipeline.close()
+
+
+
+def test_web_analysis_page_action_and_document_evidence(tmp_path: Path):
+    import re
+    import urllib.parse
+    import urllib.request
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "analysis.txt"
+    source.write_text(
+        "Programme approved on 01.09.2026 with 240 credits.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        processed = pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        server.actions.start_analysis = lambda: {
+            "kind": "analysis",
+            "status": "running",
+            "message": "Starting…",
+        }
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/analysis", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "Corpus Analysis" in body
+        assert "2026-09-01" in body or "01.09.2026" in body
+        assert "240 credits" in body
+        csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+        request = urllib.request.Request(
+            base + "/actions/analysis",
+            data=urllib.parse.urlencode({"csrf": csrf}).encode(),
+            headers={"X-Requested-With": "fetch"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 202
+        assert payload["action"]["kind"] == "analysis"
+
+        with urllib.request.urlopen(
+            base + f"/documents/{processed.sha256}",
+            timeout=5,
+        ) as response:
+            document_body = response.read().decode("utf-8")
+        assert "<h2>Evidence</h2>" in document_body
+        assert "01.09.2026" in document_body
+        assert "240 credits" in document_body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
+
+
+def test_maintenance_auto_rebuilds_stale_corpus_evidence(tmp_path: Path, monkeypatch):
+    import osint_local.actions as actions
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    settings.background["auto_index"] = False
+    settings.translation["passive_enabled"] = False
+    settings.taxonomy["enabled"] = False
+    settings.analysis["enabled"] = True
+    settings.analysis["auto_rebuild"] = True
+
+    source = settings.input_dir / "maintenance-evidence.txt"
+    source.write_text("Evidence dated 01.09.2026.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    calls = []
+    try:
+        pipeline.process_file(source)
+
+        monkeypatch.setattr(actions, "analysis_is_stale", lambda db: True)
+
+        def fake_build(db, analysis_config, progress=None, should_pause=None):
+            calls.append(True)
+            if progress:
+                progress(1, 1, "Corpus evidence ready")
+            return {
+                "evidence": 1,
+                "dates": 1,
+                "entities": 0,
+                "metrics": 0,
+            }
+
+        monkeypatch.setattr(actions, "build_corpus_evidence", fake_build)
+        manager = actions.ActionManager(pipeline)
+        result = manager._run_maintenance()
+
+        assert calls == [True]
+        assert result["analysis"]["evidence"] == 1
+        assert result["embedded_chunks"] == 0
+        assert result["translated"] == []
+    finally:
+        pipeline.close()
