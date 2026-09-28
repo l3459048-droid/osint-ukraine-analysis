@@ -147,7 +147,7 @@ DEFAULT_CONFIG = {
         "broad_topic_ratio_start": 0.25,
         "broad_topic_assignment_penalty": 0.10,
         "topic_min_cohesion": 0.72,
-        "topic_max_document_ratio": 0.45,
+        "topic_max_document_ratio": 0.30,
         "topic_recluster_similarity_boost": 0.08,
         "document_representatives": 4,
         "document_representative_pool": 16,
