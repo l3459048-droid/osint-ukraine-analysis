@@ -185,6 +185,11 @@
     "context_chars": 140,
     "max_evidence_per_chunk": 80,
     "extract_claims": true,
-    "max_claims_per_chunk": 12
+    "max_claims_per_chunk": 12,
+    "claim_review_enabled": true,
+    "claim_review_batch_size": 8,
+    "claim_review_min_confidence": 0.62,
+    "claim_review_max_chars": 1600,
+    "claim_review_model": ""
   }
 }
