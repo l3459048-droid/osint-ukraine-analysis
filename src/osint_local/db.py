@@ -1569,7 +1569,7 @@ class Database:
         limit: int = 100,
     ) -> list[sqlite3.Row]:
         kind = str(kind or "").strip().casefold()
-        if kind not in {"date", "metric"}:
+        if kind not in {"date", "metric", "claim"}:
             return []
         with self._lock:
             return self.conn.execute(
