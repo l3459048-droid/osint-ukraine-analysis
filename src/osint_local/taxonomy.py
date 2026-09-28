@@ -25,6 +25,16 @@ STOPWORDS = {
 }
 
 TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ][\w'’-]{2,}", re.UNICODE)
+TAXONOMY_QUALITY_VERSION = 2
+
+LABEL_NOISE = {
+    "topic", "topics", "information", "general", "other", "document", "documents",
+    "year", "years", "data", "table", "tables", "page", "pages",
+    "год", "года", "року", "років", "дані", "данных", "таблиця", "таблица",
+    "сторінка", "страница", "призначення", "назначение", "навантаження", "нагрузка",
+    "грн", "млн", "тис", "тыс",
+}
+
 
 
 def _wait_while_paused(
@@ -61,6 +71,8 @@ def taxonomy_is_stale(db, search_config: dict) -> bool:
         or int(latest["embedding_count"] or 0) != db.embedding_count(model)
         or str(details.get("embedding_signature") or "")
             != db.embedding_signature(model)
+        or int(details.get("taxonomy_quality_version") or 0)
+            != TAXONOMY_QUALITY_VERSION
     )
 
 
