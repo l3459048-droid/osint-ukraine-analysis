@@ -196,6 +196,25 @@ CREATE INDEX IF NOT EXISTS idx_evidence_items_kind
 CREATE INDEX IF NOT EXISTS idx_evidence_items_chunk
     ON evidence_items(chunk_id, start_offset);
 
+CREATE TABLE IF NOT EXISTS claim_reviews (
+    evidence_id INTEGER PRIMARY KEY,
+    structural_status TEXT NOT NULL,
+    claim_type TEXT NOT NULL DEFAULT '',
+    canonical_claim TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    predicate TEXT NOT NULL DEFAULT '',
+    object_text TEXT NOT NULL DEFAULT '',
+    certainty TEXT NOT NULL DEFAULT '',
+    rationale TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL,
+    method TEXT NOT NULL,
+    reviewed_at TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(evidence_id) REFERENCES evidence_items(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_claim_reviews_status
+    ON claim_reviews(structural_status, claim_type, reviewed_at);
+
 
 """
 
@@ -1441,6 +1460,116 @@ class Database:
                    WHERE e.id=?""",
                 (int(evidence_id),),
             ).fetchone()
+
+    def save_claim_review(
+        self,
+        *,
+        evidence_id: int,
+        structural_status: str,
+        claim_type: str,
+        canonical_claim: str,
+        subject: str,
+        predicate: str,
+        object_text: str,
+        certainty: str,
+        rationale: str,
+        model: str,
+        method: str,
+        reviewed_at: str,
+        details_json: str = "{}",
+    ) -> None:
+        with self._lock:
+            evidence = self.conn.execute(
+                "SELECT kind FROM evidence_items WHERE id=?",
+                (int(evidence_id),),
+            ).fetchone()
+            if not evidence or evidence["kind"] != "claim":
+                raise ValueError("Claim evidence item not found")
+            self.conn.execute(
+                """INSERT INTO claim_reviews
+                   (evidence_id, structural_status, claim_type, canonical_claim,
+                    subject, predicate, object_text, certainty, rationale,
+                    model, method, reviewed_at, details_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(evidence_id) DO UPDATE SET
+                       structural_status=excluded.structural_status,
+                       claim_type=excluded.claim_type,
+                       canonical_claim=excluded.canonical_claim,
+                       subject=excluded.subject,
+                       predicate=excluded.predicate,
+                       object_text=excluded.object_text,
+                       certainty=excluded.certainty,
+                       rationale=excluded.rationale,
+                       model=excluded.model,
+                       method=excluded.method,
+                       reviewed_at=excluded.reviewed_at,
+                       details_json=excluded.details_json""",
+                (
+                    int(evidence_id),
+                    structural_status,
+                    claim_type,
+                    canonical_claim,
+                    subject,
+                    predicate,
+                    object_text,
+                    certainty,
+                    rationale,
+                    model,
+                    method,
+                    reviewed_at,
+                    details_json,
+                ),
+            )
+            self.conn.commit()
+
+    def get_claim_review(self, evidence_id: int):
+        with self._lock:
+            return self.conn.execute(
+                """SELECT * FROM claim_reviews
+                   WHERE evidence_id=?""",
+                (int(evidence_id),),
+            ).fetchone()
+
+    def claim_review_counts(self) -> dict[str, int]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT structural_status, COUNT(*) AS n
+                   FROM claim_reviews
+                   GROUP BY structural_status"""
+            ).fetchall()
+            total = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM claim_reviews"
+                ).fetchone()[0]
+            )
+        result = {str(row["structural_status"]): int(row["n"]) for row in rows}
+        result["total"] = total
+        return result
+
+    def unreviewed_claims(
+        self,
+        *,
+        limit: int = 20,
+        min_confidence: float = 0.0,
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                """SELECT e.*, d.source_path, c.chunk_index
+                   FROM evidence_items e
+                   JOIN documents d ON d.sha256=e.document_sha256
+                   JOIN chunks c ON c.id=e.chunk_id
+                   LEFT JOIN claim_reviews r ON r.evidence_id=e.id
+                   WHERE e.kind='claim'
+                     AND e.confidence>=?
+                     AND r.evidence_id IS NULL
+                   ORDER BY e.confidence DESC, d.source_path,
+                            COALESCE(e.page, 0), e.id
+                   LIMIT ?""",
+                (
+                    float(min_confidence),
+                    max(1, min(500, int(limit))),
+                ),
+            ).fetchall()
 
     def claim_related_values(
         self,
