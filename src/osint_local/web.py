@@ -20,6 +20,7 @@ from .actions import ActionBusyError, ActionManager
 from .background import BackgroundLoop
 from .chat import chat_local
 from .corpus_analysis import analysis_is_stale
+from .corpus_dashboard import build_corpus_dashboard
 from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
 from .fast_translation import fast_ready_pairs, fast_translation_available, prepare_fast_model
@@ -49,6 +50,7 @@ from .web_ui import (
     _chat_panel,
     _chunk_card,
     _claims_panel,
+    _corpus_dashboard_panel,
     _classification_badges,
     _document_cards,
     _document_evidence_panel,
@@ -686,6 +688,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._search_page(query)
             elif path == "/documents":
                 self._documents_page(query)
+            elif path == "/corpus-dashboard":
+                self._corpus_dashboard_page(query)
             elif path == "/taxonomy":
                 self._taxonomy_page(query)
             elif path == "/analysis":
@@ -961,6 +965,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         body.append(_pagination(page, per_page, total, domain))
         body.append("</section>")
         self._html(title, "".join(body))
+
+    def _corpus_dashboard_page(self, query: dict[str, list[str]]) -> None:
+        snapshot = build_corpus_dashboard(self.settings, self.db)
+        body = [
+            _page_header(
+                "Corpus Dashboard",
+                "Operational health and coverage across the local document library.",
+            ),
+            _corpus_dashboard_panel(snapshot),
+        ]
+        self._html("Corpus Dashboard", "".join(body))
 
     def _taxonomy_page(self, query: dict[str, list[str]]) -> None:
         category_key = _first(query, "category").strip()
