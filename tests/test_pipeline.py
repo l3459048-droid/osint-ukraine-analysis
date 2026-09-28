@@ -5962,6 +5962,7 @@ def test_taxonomy_quality_v2_penalizes_overbroad_topic_assignment():
     )
     assigned = [row[1] for row in result["topic_assignments"]]
     assert "narrow" in assigned
+    assert "broad" not in assigned
 
 
 def test_taxonomy_quality_v2_filters_generic_fallback_and_llm_labels():
