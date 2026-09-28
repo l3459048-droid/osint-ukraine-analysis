@@ -159,6 +159,16 @@ DEFAULT_CONFIG = {
         "label_batch_size": 8,
         "max_llm_labels": 60,
     },
+    "analysis": {
+        "enabled": True,
+        "auto_rebuild": True,
+        "extract_dates": True,
+        "extract_entities": True,
+        "extract_metrics": True,
+        "batch_size": 500,
+        "context_chars": 140,
+        "max_evidence_per_chunk": 80,
+    },
     "background": {
         "enabled": True,
         "initial_delay_seconds": 3,
@@ -200,6 +210,7 @@ class Settings:
     search: dict[str, Any]
     translation: dict[str, Any]
     taxonomy: dict[str, Any]
+    analysis: dict[str, Any]
     background: dict[str, Any]
     qa: dict[str, Any]
     web: dict[str, Any]
@@ -255,6 +266,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         search=data["search"],
         translation=data["translation"],
         taxonomy=data["taxonomy"],
+        analysis=data["analysis"],
         background=data["background"],
         qa=data["qa"],
         web=data["web"],
