@@ -14,7 +14,7 @@ def _layout(title: str, body: str) -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.20</span></a><nav>
+<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.21</span></a><nav>
 <a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/entities">Entities</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
