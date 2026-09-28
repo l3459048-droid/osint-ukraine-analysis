@@ -5327,3 +5327,114 @@ def test_analysis_page_can_filter_claim_candidates(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_claim_related_evidence_uses_same_chunk_provenance(tmp_path: Path):
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "claim-relations.txt"
+    source.write_text(
+        "Ярослав КІЧУК підписав програму 01.09.2026 "
+        "обсягом 240 кредитів для студентів університету.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        result = pipeline.process_file(source)
+        analysis = build_corpus_evidence(pipeline.db, settings.analysis)
+        assert analysis["claims"] >= 1
+
+        claims = pipeline.db.list_evidence(kind="claim")
+        assert claims
+        claim = claims[0]
+
+        entities = pipeline.db.claim_related_values(
+            claim["id"],
+            kind="entity",
+        )
+        dates = pipeline.db.claim_related_values(
+            claim["id"],
+            kind="date",
+        )
+        metrics = pipeline.db.claim_related_values(
+            claim["id"],
+            kind="metric",
+        )
+
+        assert any(
+            row["normalized_value"] == "ярослав кічук"
+            for row in entities
+        )
+        assert any(
+            row["normalized_value"] == "2026-09-01"
+            for row in dates
+        )
+        assert any(
+            row["normalized_value"] == "240 credit"
+            for row in metrics
+        )
+
+        selected = pipeline.db.get_evidence_item(claim["id"])
+        assert selected["document_sha256"] == result.sha256
+        assert selected["chunk_index"] == 0
+    finally:
+        pipeline.close()
+
+
+def test_web_claims_explorer_shows_related_evidence(tmp_path: Path):
+    import urllib.parse
+    import urllib.request
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "claims-web.txt"
+    source.write_text(
+        "Ярослав КІЧУК підписав програму 01.09.2026 "
+        "обсягом 240 кредитів для студентів університету.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+        claim = pipeline.db.list_evidence(kind="claim")[0]
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        query = urllib.parse.urlencode({"claim": int(claim["id"])})
+        with urllib.request.urlopen(
+            base + "/claims?" + query,
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+
+        assert "Claims Explorer" in body
+        assert "Selected claim" in body
+        assert "Entities in the same chunk" in body
+        assert "Dates in the same chunk" in body
+        assert "Metrics in the same chunk" in body
+        assert "Ярослав КІЧУК" in body
+        assert "01.09.2026" in body
+        assert "240 кредитів" in body
+        assert "claims-web.txt" in body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
