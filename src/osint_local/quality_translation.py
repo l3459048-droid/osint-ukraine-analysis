@@ -13,6 +13,16 @@ from .translation_literals import missing_protected_literals, translate_preservi
 
 QUALITY_MODEL_ID = "facebook/m2m100_418M"
 QUALITY_MODEL_FILES = ("model.bin", "config.json")
+QUALITY_VALIDATION_FILE = "quality-validation.json"
+QUALITY_SOURCE_FILES = (
+    "config.json",
+    "generation_config.json",
+    "pytorch_model.bin",
+    "sentencepiece.bpe.model",
+    "vocab.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+)
 QUALITY_TOKENIZER_FILES = (
     "sentencepiece.bpe.model",
     "vocab.json",
@@ -77,17 +87,80 @@ def _usable_file(path: Path) -> bool:
         return False
 
 
+def _quality_model_files_ready(path: Path) -> bool:
+    return all(_usable_file(path / name) for name in QUALITY_MODEL_FILES) and all(
+        _usable_file(path / name)
+        for name in QUALITY_TOKENIZER_FILES
+    )
+
+
+def _quality_validation(path: Path) -> dict:
+    validation_path = path / QUALITY_VALIDATION_FILE
+    if not _usable_file(validation_path):
+        return {}
+    try:
+        value = json.loads(validation_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def quality_model_ready(settings) -> bool:
     path = quality_model_dir(settings)
-    return all(_usable_file(path / name) for name in QUALITY_MODEL_FILES) and _usable_file(
-        path / "sentencepiece.bpe.model"
+    if not _quality_model_files_ready(path):
+        return False
+    validation = _quality_validation(path)
+    return (
+        bool(validation.get("ok"))
+        and str(validation.get("model") or "") == QUALITY_MODEL_ID
     )
+
+
+def quality_model_status(settings) -> dict:
+    path = quality_model_dir(settings)
+    missing = [
+        name
+        for name in (*QUALITY_MODEL_FILES, *QUALITY_TOKENIZER_FILES)
+        if not _usable_file(path / name)
+    ]
+    validation = _quality_validation(path)
+    return {
+        "ready": quality_model_ready(settings),
+        "files_ready": not missing,
+        "missing_files": missing,
+        "validated": bool(validation.get("ok")),
+        "validation": validation,
+        "path": str(path),
+    }
 
 
 def _download_asset(filename: str) -> Path:
     from huggingface_hub import hf_hub_download
 
     return Path(hf_hub_download(repo_id=QUALITY_MODEL_ID, filename=filename))
+
+
+def _download_quality_snapshot(
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> Path:
+    from huggingface_hub import snapshot_download
+
+    if progress:
+        progress(1, 4, "Downloading M2M100 model files (resumable)…")
+    try:
+        return Path(
+            snapshot_download(
+                repo_id=QUALITY_MODEL_ID,
+                allow_patterns=list(QUALITY_SOURCE_FILES),
+            )
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Quality model download failed. The Hugging Face cache is preserved, "
+            "so pressing Prepare Quality again will reuse already downloaded files. "
+            f"Original error: {exc}"
+        ) from exc
 
 
 def _ensure_tokenizer_assets(
@@ -115,6 +188,66 @@ def _ensure_tokenizer_assets(
                 pass
 
 
+def _validate_quality_model_files(
+    settings,
+    output_dir: Path,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    if progress:
+        progress(3, 4, "Validating Quality Translation model…")
+
+    import ctranslate2
+
+    compute_type = str(settings.translation.get("quality_compute_type") or "int8")
+    try:
+        translator = ctranslate2.Translator(
+            str(output_dir),
+            device="cpu",
+            compute_type=compute_type,
+            inter_threads=1,
+            intra_threads=1,
+        )
+        sp = _load_sentencepiece(output_dir / "sentencepiece.bpe.model")
+        source_text = "Hello world."
+        source = ["__en__"] + list(sp.encode(source_text, out_type=str)) + ["</s>"]
+        results = translator.translate_batch(
+            [source],
+            target_prefix=[["__ru__"]],
+            beam_size=1,
+            max_decoding_length=32,
+        )
+        if not results or not results[0].hypotheses:
+            raise RuntimeError("model returned no hypotheses")
+        tokens = [
+            token
+            for token in results[0].hypotheses[0]
+            if token not in {"__ru__", "</s>", "<pad>"}
+        ]
+        translated = str(sp.decode(tokens) or "").strip()
+        if not translated:
+            raise RuntimeError("model returned an empty validation translation")
+    except Exception as exc:
+        raise RuntimeError(f"Quality model self-test failed: {exc}") from exc
+
+    validation = {
+        "ok": True,
+        "model": QUALITY_MODEL_ID,
+        "compute_type": compute_type,
+        "validated_at": datetime.now(timezone.utc).isoformat(),
+        "source": source_text,
+        "sample_output": translated[:200],
+    }
+    validation_path = output_dir / QUALITY_VALIDATION_FILE
+    temp = validation_path.with_suffix(validation_path.suffix + ".tmp")
+    temp.write_text(
+        json.dumps(validation, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temp.replace(validation_path)
+    return validation
+
+
 def prepare_quality_model(
     settings,
     *,
@@ -128,60 +261,91 @@ def prepare_quality_model(
 
     output_dir = quality_model_dir(settings)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
+    compute_type = str(settings.translation.get("quality_compute_type") or "int8")
 
-    if not quality_model_ready(settings):
-        if all(_usable_file(output_dir / name) for name in QUALITY_MODEL_FILES):
-            if progress:
-                progress(0, 0, "Repairing Quality Translation tokenizer files…")
-            _ensure_tokenizer_assets(output_dir, progress=progress)
-        else:
+    if quality_model_ready(settings):
+        validation = _quality_validation(output_dir)
+    else:
+        validation = {}
+        if _quality_model_files_ready(output_dir):
+            try:
+                validation = _validate_quality_model_files(
+                    settings,
+                    output_dir,
+                    progress=progress,
+                )
+            except Exception:
+                # Existing converted files may be incomplete or from an older
+                # incompatible setup. Rebuild them from the resumable HF cache.
+                shutil.rmtree(output_dir, ignore_errors=True)
+
+        if not quality_model_ready(settings):
+            snapshot_dir = _download_quality_snapshot(progress=progress)
             temp_dir = output_dir.with_name(output_dir.name + ".tmp")
             shutil.rmtree(temp_dir, ignore_errors=True)
             if progress:
-                progress(
-                    0,
-                    0,
-                    "Downloading and converting M2M100 418M Quality model to INT8…",
-                )
+                progress(2, 4, "Converting M2M100 418M to CTranslate2 INT8…")
             try:
                 import ctranslate2
 
                 converter = ctranslate2.converters.TransformersConverter(
-                    QUALITY_MODEL_ID,
+                    str(snapshot_dir),
                     copy_files=list(QUALITY_TOKENIZER_FILES),
                     low_cpu_mem_usage=True,
                 )
                 converter.convert(
                     str(temp_dir),
-                    quantization=str(
-                        settings.translation.get("quality_compute_type") or "int8"
-                    ),
+                    quantization=compute_type,
                     force=True,
                 )
                 _ensure_tokenizer_assets(temp_dir, progress=progress)
+                validation = _validate_quality_model_files(
+                    settings,
+                    temp_dir,
+                    progress=progress,
+                )
                 if output_dir.exists():
                     shutil.rmtree(output_dir)
                 temp_dir.replace(output_dir)
             except Exception as exc:
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                raise RuntimeError(f"Quality model setup failed: {exc}") from exc
+                raise RuntimeError(
+                    "Quality model conversion failed. Downloaded model files remain "
+                    "in the Hugging Face cache, so a retry will not restart the large "
+                    f"download. Original error: {exc}"
+                ) from exc
 
     if not quality_model_ready(settings):
-        raise RuntimeError("Quality model is incomplete after setup")
+        raise RuntimeError(
+            "Quality model files exist but did not pass the local self-test"
+        )
 
     result = {
         "ready": True,
         "model": QUALITY_MODEL_ID,
         "path": str(output_dir),
-        "compute_type": str(settings.translation.get("quality_compute_type") or "int8"),
+        "compute_type": compute_type,
+        "validation": validation or _quality_validation(output_dir),
     }
     if run_benchmark:
         if progress:
-            progress(0, 0, "Benchmarking OPUS vs Quality Translation…")
-        result["benchmark"] = benchmark_quality_translation(settings)
+            progress(4, 4, "Benchmarking OPUS vs Quality Translation…")
+        try:
+            result["benchmark"] = benchmark_quality_translation(settings)
+        except Exception as exc:
+            # Benchmark is diagnostic only. A validated Quality model must stay
+            # usable even if the optional comparison benchmark fails.
+            result["benchmark_error"] = f"{type(exc).__name__}: {exc}"
+            if progress:
+                progress(
+                    4,
+                    4,
+                    "Quality Translation ready; optional benchmark failed",
+                )
     if progress:
-        progress(1, 1, "Quality Translation ready")
+        progress(4, 4, "Quality Translation ready")
     return result
+
 
 
 def _load_sentencepiece(path: Path):
