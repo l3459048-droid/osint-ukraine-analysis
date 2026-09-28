@@ -1826,6 +1826,28 @@ class Database:
                 ),
             ).fetchall()
 
+    def corpus_dashboard_documents(self) -> list[sqlite3.Row]:
+        """Return the small persisted document fields needed by the corpus dashboard."""
+        with self._lock:
+            return self.conn.execute(
+                """SELECT sha256, source_path, extension, status, extraction_method,
+                          metadata_json, language, error, processed_at
+                   FROM documents
+                   ORDER BY source_path"""
+            ).fetchall()
+
+    def corpus_dashboard_translations(self, *, target_lang: str = "ru") -> list[sqlite3.Row]:
+        """Return persisted translation rows without loading translated document text."""
+        with self._lock:
+            return self.conn.execute(
+                """SELECT document_sha256, source_lang, target_lang, output_path,
+                          created_at, engine
+                   FROM translations
+                   WHERE target_lang=?
+                   ORDER BY created_at DESC""",
+                (str(target_lang),),
+            ).fetchall()
+
     def recent_errors(self, *, limit: int = 10) -> list[dict[str, Any]]:
         with self._lock:
             rows = self.conn.execute(
