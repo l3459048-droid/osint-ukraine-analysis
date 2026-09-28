@@ -1345,7 +1345,11 @@ def _ollama_labels(
     if not model:
         return {}
 
-    max_labels = max(1, int(taxonomy_config.get("max_llm_labels", 60) or 60))
+    configured_max = max(1, int(taxonomy_config.get("max_llm_labels", 120) or 120))
+    if bool(taxonomy_config.get("label_all_clusters", True)):
+        max_labels = min(120, max(configured_max, len(candidates)))
+    else:
+        max_labels = configured_max
     batch_size = max(1, min(12, int(taxonomy_config.get("label_batch_size", 8) or 8)))
     language = str(taxonomy_config.get("label_language") or "en").strip().casefold()
     output: dict[str, dict[str, str]] = {}
@@ -1364,16 +1368,24 @@ def _ollama_labels(
                     for value in item.get("snippets", [])[:2]
                 ],
                 "documents": item.get("document_count", 0),
+                "coverage_ratio": round(float(item.get("document_ratio") or 0.0), 3),
+                "cohesion": round(float(item.get("cohesion") or 0.0), 3),
             }
             for item in batch
         ]
         level = "broad category" if kind == "category" else "specific topic"
         system = (
-            "You label clusters in a local document corpus. Return ONLY a valid JSON array. "
-            "Each object must contain id, name, description. Keep names concise, neutral, "
-            f"non-duplicative, and suitable as a {level}. "
+            "You label semantic clusters in a local document corpus. Return ONLY a valid JSON array. "
+            "Each object must contain id, name, description. "
+            f"Create a concise, neutral, evidence-grounded {level} name. "
+            "Prefer the concrete subject shared by the supplied evidence over umbrella wording. "
+            "For specific topics, avoid generic labels such as 'Topics', 'Information', "
+            "'Technology', 'Military and Defense', 'Economic and Financial', or names made only "
+            "from field labels, currencies, years, quantities, or table headings. "
+            "Do not copy three unrelated keywords as a title. Distinguish this cluster from nearby "
+            "clusters by naming its dominant subject or activity. "
             f"Use {'Russian' if language == 'ru' else 'English'} names and descriptions. "
-            "Do not add facts that are not supported by the supplied keywords/snippets."
+            "Do not add facts not supported by the supplied keywords, representatives, or snippets."
         )
         response = _ollama_chat(
             base_url,
@@ -1517,6 +1529,37 @@ def _reuse_previous_labels(
             used_previous.add(best_index)
 
 
+def _generated_label_is_usable(
+    item: dict[str, Any],
+    name: str,
+) -> bool:
+    cleaned = _clean_label(name, 80)
+    if len(cleaned) < 3:
+        return False
+
+    tokens = [
+        value.casefold().strip("'’-")
+        for value in TOKEN_RE.findall(cleaned)
+    ]
+    content_tokens = [
+        token
+        for token in tokens
+        if token not in STOPWORDS and token not in LABEL_NOISE
+    ]
+    if not content_tokens:
+        return False
+
+    if str(item.get("kind") or "") == "topic":
+        generic = {
+            "military", "defense", "defence", "economic", "financial",
+            "technology", "technological", "engineering", "subscription",
+        }
+        if all(token in generic or token in LABEL_NOISE for token in tokens):
+            return False
+
+    return True
+
+
 def _apply_labels(
     candidates: list[dict[str, Any]],
     labels: dict[str, dict[str, str]],
@@ -1533,8 +1576,14 @@ def _apply_labels(
 
     for item in candidates:
         label = labels.get(item["key"]) or {}
-        name = _clean_label(label.get("name"), 80) or item["name"]
-        description = _clean_label(label.get("description"), 280) or item["description"]
+        generated_name = _clean_label(label.get("name"), 80)
+        if generated_name and _generated_label_is_usable(item, generated_name):
+            name = generated_name
+            description = _clean_label(label.get("description"), 280) or item["description"]
+            item["label_source"] = "ollama"
+        else:
+            name = item["name"]
+            description = item["description"]
 
         if str(item.get("label_source") or "") == "manual":
             item["name"] = name
@@ -1549,7 +1598,34 @@ def _apply_labels(
         item["description"] = description
 
 
-def _keywords(texts: Sequence[str], limit: int = 10) -> list[str]:
+def _document_frequency(
+    documents: Sequence[dict[str, Any]],
+) -> Counter[str]:
+    frequency: Counter[str] = Counter()
+    for document in documents:
+        seen: set[str] = set()
+        texts = [str(document.get("text") or "")]
+        texts.extend(
+            str(item.get("text") or "")
+            for item in (document.get("representatives") or [])
+        )
+        for text in texts:
+            for token in TOKEN_RE.findall(text):
+                value = token.casefold().strip("'’-")
+                if len(value) < 3 or value in STOPWORDS or value.isdigit():
+                    continue
+                seen.add(value)
+        frequency.update(seen)
+    return frequency
+
+
+def _keywords(
+    texts: Sequence[str],
+    limit: int = 10,
+    *,
+    background_df: Counter[str] | None = None,
+    background_docs: int = 0,
+) -> list[str]:
     counter: Counter[str] = Counter()
     for text in texts:
         seen: set[str] = set()
@@ -1559,14 +1635,30 @@ def _keywords(texts: Sequence[str], limit: int = 10) -> list[str]:
                 continue
             counter[value] += 1 if value in seen else 2
             seen.add(value)
-    return [token for token, _ in counter.most_common(max(1, int(limit)))]
+
+    if not background_df or background_docs <= 0:
+        return [token for token, _ in counter.most_common(max(1, int(limit)))]
+
+    scored = []
+    for token, local_weight in counter.items():
+        document_frequency = max(0, int(background_df.get(token, 0)))
+        idf = math.log((background_docs + 1) / (document_frequency + 1)) + 1.0
+        noise_penalty = 0.2 if token in LABEL_NOISE else 1.0
+        scored.append((local_weight * idf * noise_penalty, token))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [token for _score, token in scored[: max(1, int(limit))]]
 
 
 def _fallback_name(keywords: Sequence[str], default: str) -> str:
-    values = [str(value).strip() for value in keywords[:3] if str(value).strip()]
+    values = [
+        str(value).strip()
+        for value in keywords
+        if str(value).strip()
+        and str(value).strip().casefold() not in LABEL_NOISE
+    ][:3]
     if not values:
         return default
-    return " · ".join(value[:1].upper() + value[1:] for value in values)
+    return " / ".join(value[:1].upper() + value[1:] for value in values)
 
 
 def _fallback_description(kind: str, document_count: int, keywords: Sequence[str]) -> str:
