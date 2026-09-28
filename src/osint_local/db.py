@@ -390,6 +390,29 @@ class Database:
             )
             self.conn.commit()
 
+    def prune_superseded_source_versions(
+        self,
+        *,
+        source_path: str,
+        current_sha256: str,
+    ) -> int:
+        """Keep only the successfully processed current version of one source path."""
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT sha256 FROM documents
+                   WHERE source_path=? AND sha256<>?""",
+                (source_path, current_sha256),
+            ).fetchall()
+            if not rows:
+                return 0
+            self.conn.execute(
+                """DELETE FROM documents
+                   WHERE source_path=? AND sha256<>?""",
+                (source_path, current_sha256),
+            )
+            self.conn.commit()
+            return len(rows)
+
     def mark_error(self, sha256: str, error: str) -> None:
         with self._lock:
             self.conn.execute(
