@@ -5000,3 +5000,107 @@ def test_reprocessing_changed_source_path_retires_old_document_version(tmp_path:
         assert pipeline.db.chunks_for_document(first_sha) == []
     finally:
         pipeline.close()
+
+
+
+def test_entity_relationship_queries_share_chunk_provenance(tmp_path: Path):
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "relations.txt"
+    source.write_text(
+        "МІНІСТЕРСТВО ОСВІТИ І НАУКИ УКРАЇНИ. "
+        "Голова Ярослав КІЧУК затвердив програму 01.09.2026 "
+        "обсягом 240 кредитів.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        result = pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+
+        person_rows = [
+            row for row in pipeline.db.entity_values(subtype="person")
+            if row["normalized_value"] == "ярослав кічук"
+        ]
+        assert person_rows
+
+        related_entities = pipeline.db.entity_cooccurrences(
+            "ярослав кічук",
+        )
+        assert any(row["subtype"] == "organization" for row in related_entities)
+
+        related_dates = pipeline.db.entity_related_values(
+            "ярослав кічук",
+            kind="date",
+        )
+        assert any(row["normalized_value"] == "2026-09-01" for row in related_dates)
+
+        related_metrics = pipeline.db.entity_related_values(
+            "ярослав кічук",
+            kind="metric",
+        )
+        assert any(row["normalized_value"] == "240 credit" for row in related_metrics)
+
+        evidence = pipeline.db.list_evidence(
+            kind="entity",
+            normalized_value="ярослав кічук",
+        )
+        assert len(evidence) == 1
+        assert evidence[0]["document_sha256"] == result.sha256
+    finally:
+        pipeline.close()
+
+
+def test_web_entity_explorer_shows_relationship_evidence(tmp_path: Path):
+    import urllib.parse
+    import urllib.request
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "entity-web.txt"
+    source.write_text(
+        "ІЗМАЇЛЬСЬКИЙ ДЕРЖАВНИЙ ГУМАНІТАРНИЙ УНІВЕРСИТЕТ. "
+        "Ярослав КІЧУК підписав документ 01.09.2026 на 240 кредитів.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        query = urllib.parse.urlencode({"entity": "ярослав кічук"})
+        with urllib.request.urlopen(
+            base + "/entities?" + query,
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+
+        assert "Entity Explorer" in body
+        assert "Related entities" in body
+        assert "Related dates" in body
+        assert "Related metrics" in body
+        assert "01.09.2026" in body
+        assert "240 кредитів" in body
+        assert "entity-web.txt" in body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
