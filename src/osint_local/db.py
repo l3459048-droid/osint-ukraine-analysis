@@ -1508,6 +1508,90 @@ class Database:
                 params,
             ).fetchall()
 
+    def entity_values(
+        self,
+        *,
+        subtype: str | None = None,
+        limit: int = 300,
+    ) -> list[sqlite3.Row]:
+        conditions = ["kind='entity'"]
+        params: list[Any] = []
+        if subtype:
+            conditions.append("subtype=?")
+            params.append(str(subtype))
+        params.append(max(1, min(5000, int(limit))))
+        with self._lock:
+            return self.conn.execute(
+                f"""SELECT subtype, normalized_value,
+                           MIN(value) AS sample_value,
+                           COUNT(*) AS mentions,
+                           COUNT(DISTINCT document_sha256) AS documents
+                    FROM evidence_items
+                    WHERE {" AND ".join(conditions)}
+                    GROUP BY subtype, normalized_value
+                    ORDER BY documents DESC, mentions DESC, normalized_value
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+
+    def entity_cooccurrences(
+        self,
+        normalized_value: str,
+        *,
+        limit: int = 100,
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                """SELECT b.subtype, b.normalized_value,
+                          MIN(b.value) AS sample_value,
+                          COUNT(DISTINCT b.document_sha256) AS documents,
+                          COUNT(DISTINCT b.chunk_id) AS shared_chunks
+                   FROM evidence_items a
+                   JOIN evidence_items b ON b.chunk_id=a.chunk_id
+                   WHERE a.kind='entity'
+                     AND a.normalized_value=?
+                     AND b.kind='entity'
+                     AND b.normalized_value<>a.normalized_value
+                   GROUP BY b.subtype, b.normalized_value
+                   ORDER BY documents DESC, shared_chunks DESC, b.normalized_value
+                   LIMIT ?""",
+                (
+                    str(normalized_value),
+                    max(1, min(1000, int(limit))),
+                ),
+            ).fetchall()
+
+    def entity_related_values(
+        self,
+        normalized_value: str,
+        *,
+        kind: str,
+        limit: int = 100,
+    ) -> list[sqlite3.Row]:
+        kind = str(kind or "").strip().casefold()
+        if kind not in {"date", "metric"}:
+            return []
+        with self._lock:
+            return self.conn.execute(
+                """SELECT b.kind, b.subtype, b.normalized_value,
+                          MIN(b.value) AS sample_value,
+                          COUNT(DISTINCT b.document_sha256) AS documents,
+                          COUNT(DISTINCT b.chunk_id) AS shared_chunks
+                   FROM evidence_items a
+                   JOIN evidence_items b ON b.chunk_id=a.chunk_id
+                   WHERE a.kind='entity'
+                     AND a.normalized_value=?
+                     AND b.kind=?
+                   GROUP BY b.kind, b.subtype, b.normalized_value
+                   ORDER BY documents DESC, shared_chunks DESC, b.normalized_value
+                   LIMIT ?""",
+                (
+                    str(normalized_value),
+                    kind,
+                    max(1, min(1000, int(limit))),
+                ),
+            ).fetchall()
+
     def top_evidence_values(
         self,
         *,
