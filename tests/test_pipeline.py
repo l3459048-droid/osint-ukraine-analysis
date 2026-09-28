@@ -5224,3 +5224,106 @@ def test_web_analysis_and_entities_show_claim_candidates(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_claim_candidate_extraction_covers_multilingual_assertion_types():
+    from osint_local.corpus_analysis import extract_chunk_evidence
+
+    samples = [
+        (
+            "Освітня програма вводиться в дію з 01.09.2026 року та включає 240 кредитів.",
+            "assertion_candidate",
+        ),
+        (
+            "According to the Ministry, the programme contains 240 credits and starts on 01.09.2026.",
+            "attributed_candidate",
+        ),
+        (
+            "The programme will start on 01.09.2026 and will include 240 credits for students.",
+            "forecast_candidate",
+        ),
+        (
+            "The programme must include 240 credits and requires practical training for all students.",
+            "recommendation_candidate",
+        ),
+    ]
+
+    for index, (text_value, expected_subtype) in enumerate(samples, start=1):
+        items = extract_chunk_evidence(
+            text_value,
+            document_sha256=f"{index:064x}",
+            chunk_id=index,
+            page=1,
+        )
+        claims = [item for item in items if item["kind"] == "claim"]
+        assert claims, text_value
+        assert any(item["subtype"] == expected_subtype for item in claims)
+        assert all(item["context"] for item in claims)
+        assert all(item["confidence"] >= 0.58 for item in claims)
+
+
+def test_claim_candidates_reject_headings_and_placeholder_noise():
+    from osint_local.corpus_analysis import extract_chunk_evidence
+
+    text = (
+        "МІНІСТЕРСТВО ОСВІТИ І НАУКИ УКРАЇНИ\n\n"
+        "Протокол № ______ від ______ 2026 року.\n"
+        "GENERAL INFORMATION"
+    )
+    items = extract_chunk_evidence(
+        text,
+        document_sha256="f" * 64,
+        chunk_id=1,
+        page=1,
+    )
+    assert [item for item in items if item["kind"] == "claim"] == []
+
+
+def test_analysis_page_can_filter_claim_candidates(tmp_path: Path):
+    import urllib.parse
+    import urllib.request
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "claims.txt"
+    source.write_text(
+        "The programme will start on 01.09.2026 and will include 240 credits for students.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        pipeline.process_file(source)
+        analysis = build_corpus_evidence(pipeline.db, settings.analysis)
+        assert analysis["claims"] >= 1
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        query = urllib.parse.urlencode({"kind": "claim"})
+        with urllib.request.urlopen(
+            base + "/analysis?" + query,
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+
+        assert "Claims" in body
+        assert "forecast_candidate" in body
+        assert "programme will start" in body
+        assert "claims.txt" in body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
