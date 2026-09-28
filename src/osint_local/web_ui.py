@@ -922,6 +922,78 @@ def _timeline_panel(
 </div>"""
 
 
+def _timeline_panel(
+    *,
+    dates,
+    evidence,
+    categories,
+    topics,
+    date_from: str = "",
+    date_to: str = "",
+    selected_category: str = "",
+    selected_topic: str = "",
+    selected_date: str = "",
+) -> str:
+    category_options = '<option value="">All adaptive categories</option>' + "".join(
+        f'<option value="{_e(row["category_key"])}"{" selected" if str(row["category_key"]) == selected_category else ""}>'
+        f'{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in categories
+    )
+    topic_options = '<option value="">All topics</option>' + "".join(
+        f'<option value="{_e(row["topic_key"])}"{" selected" if str(row["topic_key"]) == selected_topic else ""}>'
+        f'{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in topics
+    )
+
+    date_rows = []
+    for row in dates:
+        params = {}
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
+        if selected_category:
+            params["category"] = selected_category
+        if selected_topic:
+            params["topic"] = selected_topic
+        params["date"] = row["date_value"]
+        active = " active" if str(row["date_value"]) == selected_date else ""
+        date_rows.append(
+            f'<a class="doc-card{active}" href="/timeline?{urlencode(params)}"><div>'
+            f'<strong>{_e(row["date_value"])}</strong>'
+            f'<span>{int(row["documents"])} document(s) · {int(row["mentions"])} mention(s) · {_e(row["sample_value"])}</span>'
+            f'</div><span class="arrow">→</span></a>'
+        )
+    dates_html = (
+        '<div class="doc-list">' + "".join(date_rows) + "</div>"
+        if date_rows else '<div class="empty">No extracted calendar dates in this filter.</div>'
+    )
+
+    evidence_html = ""
+    if selected_date:
+        evidence_html = (
+            '<section class="panel"><div class="panel-head"><div>'
+            f'<h2>{_e(selected_date)}</h2><span class="panel-subtle">{len(evidence)} evidence occurrence(s)</span>'
+            '</div></div>'
+            + (_evidence_cards(evidence) if evidence else '<div class="empty">No evidence found.</div>')
+            + '</section>'
+        )
+
+    return f"""<section class="panel">
+<div class="panel-head"><div><h2>Corpus Timeline</h2><span class="panel-subtle">{len(dates)} distinct date(s) in current view</span></div></div>
+<form class="search-form" action="/timeline" method="get">
+<input name="from" type="date" value="{_e(date_from)}" aria-label="From date">
+<input name="to" type="date" value="{_e(date_to)}" aria-label="To date">
+<select name="category">{category_options}</select>
+<select name="topic">{topic_options}</select>
+<button type="submit">Filter</button>
+</form>
+<div class="ask-filter-note">Timeline uses dates extracted from document text, not file modification dates. Every date remains linked to its document, page and chunk evidence.</div>
+</section>
+<section class="panel"><div class="panel-head"><h2>Dates</h2><span class="panel-subtle">Chronological</span></div>{dates_html}</section>
+{evidence_html}"""
+
+
 def _evidence_cards(rows) -> str:
     cards = []
     for row in rows:
