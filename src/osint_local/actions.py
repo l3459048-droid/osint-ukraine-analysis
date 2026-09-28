@@ -339,10 +339,16 @@ class ActionManager:
                         should_pause=self.interactive_busy,
                     )
                     if refresh_result.get("needs_rebuild"):
+                        rebuild_reason = str(refresh_result.get("reason") or "")
+                        rebuild_message = (
+                            "Taxonomy quality upgrade; rebuilding from existing embeddings…"
+                            if rebuild_reason == "taxonomy_quality_upgrade"
+                            else "New topics detected; rebuilding adaptive taxonomy…"
+                        )
                         self._progress(
                             0,
                             0,
-                            "New topics detected; rebuilding adaptive taxonomy…",
+                            rebuild_message,
                         )
                         taxonomy_result = build_adaptive_taxonomy(
                             self.pipeline.db,
