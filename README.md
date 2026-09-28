@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.20
+# OSINT Ukraine Analysis — local-first v0.9.21
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.20
+## Что делает v0.9.21
 
 ```text
 папка документов
@@ -98,6 +98,37 @@ osint-local translate <SHA256> --from auto
 ```
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
+
+## Corpus Evidence / Timeline / Entity Explorer v0.9.21
+
+Поверх taxonomy добавлен отдельный provenance-first analytical layer. Он работает по уже готовым chunks и не запускает повторно OCR или перевод.
+
+Извлекаются:
+
+- **Dates** — числовые и month-name calendar dates с нормализацией к ISO;
+- **Metrics** — проценты, длительности, расстояния, массы, валюты, кредиты/ECTS и другие number+unit факты;
+- **Entities** — базовые person / organization / acronym candidates;
+- для каждого evidence сохраняется точная связь:
+  `document_sha256 → page → chunk_id/chunk_index → local character offsets → context`.
+
+Web UI получил:
+
+- **Analysis** — counts, top values и все evidence occurrences;
+- **Timeline** — даты из содержания документов в хронологическом порядке, с фильтрами adaptive category/topic;
+- **Entities** — people / organizations / acronyms и консервативные shared-chunk связи entity ↔ entity/date/metric;
+- на странице документа — компактный блок **Evidence** с переходом к corpus analysis.
+
+Entity relationships сейчас означают **совместное появление в одном chunk**, а не причинность. Это намеренно conservative foundation для следующего слоя claims/relations.
+
+Анализ автоматически обновляется только когда меняется chunk fingerprint; Chat/Ask могут приостанавливать фоновый analysis на безопасных границах batch.
+
+Добавлена CLI-команда:
+
+```powershell
+osint-local analyze
+```
+
+Также исправлен lifecycle изменённых файлов: после успешной обработки новой версии того же `source_path` старая SHA-запись удаляется каскадно из активной библиотеки. Поэтому Search/Corpus/Timeline больше не накапливают старые «ghost versions». Старая запись удаляется только после успешной обработки новой версии.
 
 ## Adaptive Corpus Taxonomy lifecycle v0.9.20
 
