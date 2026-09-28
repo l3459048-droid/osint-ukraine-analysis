@@ -5795,7 +5795,7 @@ def test_corpus_dashboard_reports_library_health_and_web_page(tmp_path: Path):
             body = response.read().decode("utf-8")
         assert response.status == 200
         assert "Corpus Dashboard" in body
-        assert "Translation coverage &amp; quality" in body
+        assert "Translation coverage & quality" in body
         assert "Low extraction quality" in body
         assert "hybrid-ct2-quality" in body
     finally:
