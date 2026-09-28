@@ -1379,6 +1379,8 @@ class Database:
         kind: str | None = None,
         subtype: str | None = None,
         normalized_value: str | None = None,
+        category_key: str | None = None,
+        topic_key: str | None = None,
         limit: int = 500,
         offset: int = 0,
     ) -> list[sqlite3.Row]:
@@ -1393,6 +1395,24 @@ class Database:
         if normalized_value:
             conditions.append("e.normalized_value=?")
             params.append(str(normalized_value))
+        if category_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_categories dtc
+                    WHERE dtc.document_sha256=e.document_sha256
+                      AND dtc.category_key=?
+                )"""
+            )
+            params.append(str(category_key))
+        if topic_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_topics dtt
+                    WHERE dtt.document_sha256=e.document_sha256
+                      AND dtt.topic_key=?
+                )"""
+            )
+            params.append(str(topic_key))
         clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         params.extend([
             max(1, min(5000, int(limit))),
@@ -1409,6 +1429,50 @@ class Database:
                              d.source_path, COALESCE(e.page, 0), e.chunk_id
                     LIMIT ? OFFSET ?""",
                 params,
+            ).fetchall()
+
+    def get_evidence_item(self, evidence_id: int):
+        with self._lock:
+            return self.conn.execute(
+                """SELECT e.*, d.source_path, c.chunk_index
+                   FROM evidence_items e
+                   JOIN documents d ON d.sha256=e.document_sha256
+                   JOIN chunks c ON c.id=e.chunk_id
+                   WHERE e.id=?""",
+                (int(evidence_id),),
+            ).fetchone()
+
+    def claim_related_values(
+        self,
+        claim_id: int,
+        *,
+        kind: str,
+        limit: int = 100,
+    ) -> list[sqlite3.Row]:
+        kind = str(kind or "").strip().casefold()
+        if kind not in {"date", "entity", "metric"}:
+            return []
+        with self._lock:
+            return self.conn.execute(
+                """SELECT related.kind, related.subtype,
+                          related.normalized_value,
+                          MIN(related.value) AS sample_value,
+                          COUNT(*) AS mentions
+                   FROM evidence_items claim
+                   JOIN evidence_items related
+                     ON related.chunk_id=claim.chunk_id
+                   WHERE claim.id=?
+                     AND claim.kind='claim'
+                     AND related.kind=?
+                   GROUP BY related.kind, related.subtype,
+                            related.normalized_value
+                   ORDER BY mentions DESC, related.normalized_value
+                   LIMIT ?""",
+                (
+                    int(claim_id),
+                    kind,
+                    max(1, min(1000, int(limit))),
+                ),
             ).fetchall()
 
     def timeline_dates(
