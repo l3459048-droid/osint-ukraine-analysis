@@ -14,7 +14,7 @@ def _layout(title: str, body: str) -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.22</span></a><nav>
+<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.23</span></a><nav>
 <a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/corpus-dashboard">Dashboard</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/entities">Entities</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
@@ -694,7 +694,16 @@ def _taxonomy_panel(
     )
     cycle_parts = []
     if latest_run:
+        quality_version = int(details.get("taxonomy_quality_version") or 0)
+        mean_cohesion = float(details.get("mean_topic_cohesion") or 0.0)
+        largest_ratio = float(details.get("largest_topic_discovery_ratio") or 0.0)
+        if quality_version:
+            cycle_parts.append(f"quality v{quality_version}")
         cycle_parts.append(f"mode {refresh_mode}")
+        if mean_cohesion:
+            cycle_parts.append(f"mean cohesion {mean_cohesion:.2f}")
+        if largest_ratio:
+            cycle_parts.append(f"largest topic {largest_ratio * 100:.0f}%")
         if growth_trigger:
             cycle_parts.append(f"growth {growth}/{growth_trigger}")
         if unassigned_trigger:
