@@ -1097,22 +1097,28 @@ def _cluster_items(
         else:
             clusters.append({"members": [item], "vector": list(item["vector"])})
 
-    while len(clusters) > 1:
-        best_pair: tuple[int, int] | None = None
+    # A second greedy pass removes order-dependent near-duplicates without
+    # the cubic all-pairs merge loop. This matters when a large document corpus
+    # produces several semantic facets per document.
+    merged: list[dict[str, Any]] = []
+    for cluster in sorted(
+        clusters,
+        key=lambda item: (-len(item["members"]), str(item["members"][0]["id"])),
+    ):
+        best_index = -1
         best_score = merge_threshold
-        for left in range(len(clusters)):
-            for right in range(left + 1, len(clusters)):
-                score = _dot(clusters[left]["vector"], clusters[right]["vector"])
-                if score >= best_score:
-                    best_score = score
-                    best_pair = (left, right)
-        if best_pair is None:
-            break
-        left, right = best_pair
-        clusters[left]["members"].extend(clusters[right]["members"])
-        _refresh_cluster(clusters[left], weighted=weighted)
-        del clusters[right]
+        for index, existing in enumerate(merged):
+            score = _dot(cluster["vector"], existing["vector"])
+            if score >= best_score:
+                best_score = score
+                best_index = index
+        if best_index < 0:
+            merged.append(cluster)
+            continue
+        merged[best_index]["members"].extend(cluster["members"])
+        _refresh_cluster(merged[best_index], weighted=weighted)
 
+    clusters = merged
     return sorted(
         clusters,
         key=lambda cluster: (
