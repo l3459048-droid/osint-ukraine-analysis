@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from .actions import ActionBusyError, ActionManager
 from .background import BackgroundLoop
 from .chat import chat_local
+from .corpus_analysis import analysis_is_stale
 from .config import PERFORMANCE_PROFILES, Settings, load_settings, performance_profile_patch, update_config
 from .desktop import open_folder, pick_folder
 from .fast_translation import fast_ready_pairs, fast_translation_available, prepare_fast_model
@@ -39,6 +40,7 @@ from .translation_export import (
 from .taxonomy import taxonomy_is_stale
 from .web_ui import (
     _action_panel,
+    _analysis_panel,
     _activity_details,
     _adaptive_category_list,
     _ask_form,
@@ -48,6 +50,7 @@ from .web_ui import (
     _chunk_card,
     _classification_badges,
     _document_cards,
+    _document_evidence_panel,
     _document_table,
     _domain_filter,
     _e,
@@ -682,6 +685,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._documents_page(query)
             elif path == "/taxonomy":
                 self._taxonomy_page(query)
+            elif path == "/analysis":
+                self._analysis_page(query)
             elif path == "/ask":
                 self._ask_page(query)
             elif path == "/chat":
@@ -730,6 +735,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._start_action("index")
             elif path == "/actions/taxonomy":
                 self._start_action("taxonomy")
+            elif path == "/actions/analysis":
+                self._start_action("analysis")
             elif path == "/actions/taxonomy-label":
                 self._taxonomy_label_action()
             elif path == "/actions/open-folder":
@@ -1017,6 +1024,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
         ]
         self._html("Corpus", "".join(body))
 
+    def _analysis_page(self, query: dict[str, list[str]]) -> None:
+        kind = _first(query, "kind").strip().casefold()
+        if kind not in {"", "date", "entity", "metric"}:
+            kind = ""
+        normalized_value = _first(query, "value").strip()
+
+        counts = self.db.evidence_counts()
+        latest = self.db.latest_corpus_analysis_run()
+        evidence = self.db.list_evidence(
+            kind=kind or None,
+            normalized_value=normalized_value or None,
+            limit=300,
+        )
+        top_values = {
+            evidence_kind: self.db.top_evidence_values(
+                kind=evidence_kind,
+                limit=30,
+            )
+            for evidence_kind in ("date", "entity", "metric")
+        }
+        body = [
+            _page_header(
+                "Analysis",
+                "Evidence extracted from the local corpus with direct document/page/chunk provenance.",
+            ),
+            _analysis_panel(
+                self.server.csrf_token,
+                counts=counts,
+                latest_run=latest,
+                top_values=top_values,
+                evidence=evidence,
+                action=self.server.actions.snapshot(),
+                selected_kind=kind,
+                selected_value=normalized_value,
+                stale=analysis_is_stale(self.db),
+            ),
+        ]
+        self._html("Analysis", "".join(body))
+
     def _settings_page(self, query: dict[str, list[str]]) -> None:
         stats = self._stats_payload()
         semantic_available = importlib.util.find_spec("sentence_transformers") is not None
@@ -1059,6 +1105,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "Document not found")
             return
         classes = self.db.get_classifications(sha256)
+        evidence = self.db.evidence_for_document(sha256, limit=120)
         chunks = self.db.chunks_for_document(sha256, limit=1000)
         source_url = f"/source/{quote(sha256)}"
         metadata = _safe_json(doc["metadata_json"])
@@ -1085,6 +1132,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "</section>",
             '<section class="panel"><div class="panel-head"><h2>Adaptive taxonomy</h2><a href="/taxonomy">Corpus</a></div>',
             _taxonomy_badges(self.db.taxonomy_for_document(sha256)),
+            "</section>",
+            '<section class="panel"><div class="panel-head"><h2>Evidence</h2><a href="/analysis">Analysis</a></div>',
+            _document_evidence_panel(evidence),
             "</section>",
             '<section class="panel"><div class="panel-head"><h2>Metadata</h2></div>',
             _metadata_grid(metadata, doc),
@@ -1204,6 +1254,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         profile = str(self.settings.performance.get("profile") or "economy")
         profile_info = PERFORMANCE_PROFILES.get(profile, {})
         latest_taxonomy = self.db.latest_taxonomy_run()
+        latest_analysis = self.db.latest_corpus_analysis_run()
+        evidence_counts = self.db.evidence_counts()
         return {
             **stats,
             "semantic_available": semantic_available,
@@ -1231,6 +1283,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "taxonomy_last_rebuild": (
                 latest_taxonomy["finished_at"] if latest_taxonomy else None
             ),
+            "analysis_stale": analysis_is_stale(self.db),
+            "analysis_last_rebuild": (
+                latest_analysis["finished_at"] if latest_analysis else None
+            ),
+            "evidence_total": evidence_counts.get("total", 0),
+            "evidence_documents": evidence_counts.get("documents", 0),
         }
 
     def _activity_payload(self) -> dict:
@@ -1273,6 +1331,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     )
                     return
                 action = self.server.actions.start_taxonomy()
+            elif kind == "analysis":
+                if self.db.chunk_count() <= 0:
+                    self._action_response(
+                        {"error": "Corpus analysis requires processed document chunks."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                action = self.server.actions.start_analysis()
             else:
                 self._action_response({"error": "Unknown action"}, status=HTTPStatus.NOT_FOUND)
                 return
