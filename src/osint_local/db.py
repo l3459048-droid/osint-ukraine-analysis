@@ -1327,9 +1327,11 @@ class Database:
         params.append(limit)
         with self._lock:
             return self.conn.execute(
-                f"""SELECT * FROM evidence_items
-                    WHERE document_sha256=?{condition}
-                    ORDER BY COALESCE(page, 0), chunk_id, start_offset
+                f"""SELECT e.*, c.chunk_index
+                    FROM evidence_items e
+                    JOIN chunks c ON c.id=e.chunk_id
+                    WHERE e.document_sha256=?{condition}
+                    ORDER BY COALESCE(e.page, 0), e.chunk_id, e.start_offset
                     LIMIT ?""",
                 params,
             ).fetchall()
@@ -1361,9 +1363,10 @@ class Database:
         ])
         with self._lock:
             return self.conn.execute(
-                f"""SELECT e.*, d.source_path
+                f"""SELECT e.*, d.source_path, c.chunk_index
                     FROM evidence_items e
                     JOIN documents d ON d.sha256=e.document_sha256
+                    JOIN chunks c ON c.id=e.chunk_id
                     {clause}
                     ORDER BY e.kind, e.normalized_value,
                              d.source_path, COALESCE(e.page, 0), e.chunk_id
