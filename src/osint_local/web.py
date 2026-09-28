@@ -72,6 +72,7 @@ from .web_ui import (
     _translation_panel,
     _taxonomy_badges,
     _taxonomy_panel,
+    _timeline_panel,
 )
 
 LOG = logging.getLogger("osint_local.web")
@@ -687,6 +688,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._taxonomy_page(query)
             elif path == "/analysis":
                 self._analysis_page(query)
+            elif path == "/timeline":
+                self._timeline_page(query)
             elif path == "/ask":
                 self._ask_page(query)
             elif path == "/chat":
@@ -1062,6 +1065,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
         ]
         self._html("Analysis", "".join(body))
+
+    def _timeline_page(self, query: dict[str, list[str]]) -> None:
+        date_from = _first(query, "from").strip()
+        date_to = _first(query, "to").strip()
+        category_key = _first(query, "category").strip()
+        topic_key = _first(query, "topic").strip()
+        selected_date = _first(query, "date").strip()
+
+        categories = self.db.list_taxonomy_categories(limit=200)
+        topics = self.db.list_taxonomy_topics(limit=500)
+        dates = self.db.timeline_dates(
+            date_from=date_from or None,
+            date_to=date_to or None,
+            category_key=category_key or None,
+            topic_key=topic_key or None,
+            limit=1000,
+        )
+        evidence = (
+            self.db.timeline_evidence(
+                date_value=selected_date,
+                category_key=category_key or None,
+                topic_key=topic_key or None,
+                limit=300,
+            )
+            if selected_date else []
+        )
+
+        body = [
+            _page_header(
+                "Timeline",
+                "Chronology built from dates extracted inside the document corpus.",
+            ),
+            _timeline_panel(
+                dates=dates,
+                evidence=evidence,
+                categories=categories,
+                topics=topics,
+                date_from=date_from,
+                date_to=date_to,
+                selected_category=category_key,
+                selected_topic=topic_key,
+                selected_date=selected_date,
+            ),
+        ]
+        self._html("Timeline", "".join(body))
 
     def _settings_page(self, query: dict[str, list[str]]) -> None:
         stats = self._stats_payload()
