@@ -5926,10 +5926,11 @@ def test_taxonomy_quality_v2_preserves_multiple_document_facets(tmp_path: Path):
 def test_taxonomy_quality_v2_penalizes_overbroad_topic_assignment():
     import osint_local.taxonomy as taxonomy
 
+    document_vector = [0.75, (1 - 0.75 ** 2) ** 0.5]
     document = {
         "id": "doc",
-        "vector": [1.0, 0.0],
-        "representatives": [{"vector": [0.75, (1 - 0.75 ** 2) ** 0.5]}],
+        "vector": document_vector,
+        "representatives": [{"vector": document_vector}],
     }
     broad = {
         "key": "broad",
