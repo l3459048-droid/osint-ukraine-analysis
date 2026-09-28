@@ -1374,6 +1374,104 @@ class Database:
                 params,
             ).fetchall()
 
+    def timeline_dates(
+        self,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        category_key: str | None = None,
+        topic_key: str | None = None,
+        limit: int = 1000,
+    ) -> list[sqlite3.Row]:
+        conditions = ["e.kind='date'"]
+        params: list[Any] = []
+        if date_from:
+            conditions.append("e.normalized_value>=?")
+            params.append(str(date_from))
+        if date_to:
+            conditions.append("e.normalized_value<=?")
+            params.append(str(date_to))
+        if category_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_categories dtc
+                    WHERE dtc.document_sha256=e.document_sha256
+                      AND dtc.category_key=?
+                )"""
+            )
+            params.append(str(category_key))
+        if topic_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_topics dtt
+                    WHERE dtt.document_sha256=e.document_sha256
+                      AND dtt.topic_key=?
+                )"""
+            )
+            params.append(str(topic_key))
+
+        params.append(max(1, min(5000, int(limit))))
+        clause = " AND ".join(conditions)
+        with self._lock:
+            return self.conn.execute(
+                f"""SELECT e.normalized_value AS date_value,
+                           MIN(e.value) AS sample_value,
+                           COUNT(*) AS mentions,
+                           COUNT(DISTINCT e.document_sha256) AS documents
+                    FROM evidence_items e
+                    WHERE {clause}
+                    GROUP BY e.normalized_value
+                    ORDER BY e.normalized_value ASC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+
+    def timeline_evidence(
+        self,
+        *,
+        date_value: str,
+        category_key: str | None = None,
+        topic_key: str | None = None,
+        limit: int = 300,
+    ) -> list[sqlite3.Row]:
+        conditions = [
+            "e.kind='date'",
+            "e.normalized_value=?",
+        ]
+        params: list[Any] = [str(date_value)]
+        if category_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_categories dtc
+                    WHERE dtc.document_sha256=e.document_sha256
+                      AND dtc.category_key=?
+                )"""
+            )
+            params.append(str(category_key))
+        if topic_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_topics dtt
+                    WHERE dtt.document_sha256=e.document_sha256
+                      AND dtt.topic_key=?
+                )"""
+            )
+            params.append(str(topic_key))
+        params.append(max(1, min(5000, int(limit))))
+
+        with self._lock:
+            return self.conn.execute(
+                f"""SELECT e.*, d.source_path, c.chunk_index
+                    FROM evidence_items e
+                    JOIN documents d ON d.sha256=e.document_sha256
+                    JOIN chunks c ON c.id=e.chunk_id
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY d.source_path, COALESCE(e.page, 0),
+                             e.chunk_id, e.start_offset
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+
     def top_evidence_values(
         self,
         *,
