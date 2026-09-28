@@ -4558,3 +4558,137 @@ def test_pinned_taxonomy_name_stays_exact_when_auto_label_collides():
 
     assert candidates[0]["name"] == "Energy"
     assert candidates[1]["name"] == "Energy 2"
+
+
+
+def test_corpus_evidence_extracts_dates_metrics_entities_and_provenance():
+    from osint_local.corpus_analysis import extract_chunk_evidence
+
+    text = (
+        "МІНІСТЕРСТВО ОСВІТИ І НАУКИ УКРАЇНИ\n"
+        "ІЗМАЇЛЬСЬКИЙ ДЕРЖАВНИЙ ГУМАНІТАРНИЙ УНІВЕРСИТЕТ\n"
+        "Голова вченої ради Ярослав КІЧУК.\n"
+        "Освітня програма вводиться в дію з 01.09.2026 р. "
+        "Обсяг програми 240 кредитів ЄКТС."
+    )
+
+    items = extract_chunk_evidence(
+        text,
+        document_sha256="a" * 64,
+        chunk_id=42,
+        page=1,
+    )
+
+    dates = [item for item in items if item["kind"] == "date"]
+    metrics = [item for item in items if item["kind"] == "metric"]
+    persons = [
+        item for item in items
+        if item["kind"] == "entity" and item["subtype"] == "person"
+    ]
+    orgs = [
+        item for item in items
+        if item["kind"] == "entity" and item["subtype"] == "organization"
+    ]
+    acronyms = [
+        item for item in items
+        if item["kind"] == "entity" and item["subtype"] == "acronym"
+    ]
+
+    assert any(item["normalized_value"] == "2026-09-01" for item in dates)
+    assert any(item["normalized_value"] == "240 credit" for item in metrics)
+    assert any("ярослав кічук" == item["normalized_value"] for item in persons)
+    assert any("університет" in item["normalized_value"] for item in orgs)
+    assert all(item["document_sha256"] == "a" * 64 for item in items)
+    assert all(item["chunk_id"] == 42 for item in items)
+    assert all(item["page"] == 1 for item in items)
+    assert all(item["context"] for item in items)
+    assert all(item["start_offset"] < item["end_offset"] for item in items)
+    assert all(item["value"] != "КІЧУК" for item in acronyms)
+
+
+def test_corpus_analysis_persists_evidence_and_detects_staleness(tmp_path: Path):
+    from osint_local.corpus_analysis import (
+        analysis_is_stale,
+        build_corpus_evidence,
+    )
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+
+    source = settings.input_dir / "evidence.txt"
+    source.write_text(
+        "University report dated 10 July 2018. "
+        "Programme duration 3 years and 240 credits.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        result = pipeline.process_file(source)
+        assert result.status == "processed"
+        assert analysis_is_stale(pipeline.db) is True
+
+        analysis = build_corpus_evidence(
+            pipeline.db,
+            settings.analysis,
+        )
+
+        assert analysis["evidence"] >= 3
+        assert analysis["dates"] >= 1
+        assert analysis["metrics"] >= 2
+        assert analysis_is_stale(pipeline.db) is False
+
+        rows = pipeline.db.evidence_for_document(result.sha256)
+        assert rows
+        assert all(row["document_sha256"] == result.sha256 for row in rows)
+        assert all(row["chunk_id"] for row in rows)
+        assert any(row["normalized_value"] == "2018-07-10" for row in rows)
+
+        counts = pipeline.db.evidence_counts()
+        assert counts["total"] == len(rows)
+        assert counts["documents"] == 1
+
+        extra = settings.input_dir / "new.txt"
+        extra.write_text(
+            "New evidence dated 01.09.2026 and 50 percent complete.",
+            encoding="utf-8",
+        )
+        extra_result = pipeline.process_file(extra)
+        assert extra_result.status == "processed"
+        assert analysis_is_stale(pipeline.db) is True
+    finally:
+        pipeline.close()
+
+
+def test_corpus_analysis_replaces_old_evidence_transactionally(tmp_path: Path):
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "replace.txt"
+    source.write_text("Report date 01.09.2026.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    try:
+        result = pipeline.process_file(source)
+        first = build_corpus_evidence(pipeline.db, settings.analysis)
+        assert first["dates"] == 1
+        assert any(
+            row["normalized_value"] == "2026-09-01"
+            for row in pipeline.db.evidence_for_document(result.sha256)
+        )
+
+        source.write_text("Report date 02.10.2027.", encoding="utf-8")
+        second_result = pipeline.process_file(source, force=True)
+        assert second_result.status == "processed"
+        second = build_corpus_evidence(pipeline.db, settings.analysis)
+        assert second["dates"] == 1
+
+        values = {
+            row["normalized_value"]
+            for row in pipeline.db.evidence_for_document(second_result.sha256)
+            if row["kind"] == "date"
+        }
+        assert values == {"2027-10-02"}
+    finally:
+        pipeline.close()
