@@ -183,6 +183,8 @@
     "extract_metrics": true,
     "batch_size": 500,
     "context_chars": 140,
-    "max_evidence_per_chunk": 80
+    "max_evidence_per_chunk": 80,
+    "extract_claims": true,
+    "max_claims_per_chunk": 12
   }
 }
