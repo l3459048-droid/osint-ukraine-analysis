@@ -746,6 +746,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._start_action("taxonomy")
             elif path == "/actions/analysis":
                 self._start_action("analysis")
+            elif path == "/actions/claim-review":
+                self._claim_review_action()
             elif path == "/actions/taxonomy-label":
                 self._taxonomy_label_action()
             elif path == "/actions/open-folder":
@@ -1121,13 +1123,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "Candidate assertions extracted from evidence-rich sentences. Verify every candidate against its source.",
             ),
             _claims_panel(
+                csrf_token=self.server.csrf_token,
                 claims=claims,
                 categories=self.db.list_taxonomy_categories(limit=200),
                 topics=self.db.list_taxonomy_topics(limit=500),
                 selected_claim=selected_claim,
+                selected_review=(
+                    self.db.get_claim_review(int(selected_claim["id"]))
+                    if selected_claim is not None else None
+                ),
+                review_counts=self.db.claim_review_counts(),
                 related_entities=related_entities,
                 related_dates=related_dates,
                 related_metrics=related_metrics,
+                action=self.server.actions.snapshot(),
+                review_enabled=bool(
+                    self.settings.analysis.get("claim_review_enabled", True)
+                ),
+                review_batch_size=max(
+                    1,
+                    min(
+                        50,
+                        int(
+                            self.settings.analysis.get(
+                                "claim_review_batch_size",
+                                8,
+                            )
+                            or 8
+                        ),
+                    ),
+                ),
                 selected_subtype=subtype,
                 selected_category=category_key,
                 selected_topic=topic_key,
@@ -1528,6 +1553,65 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._action_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         self._action_response({"action": action}, status=HTTPStatus.ACCEPTED)
+
+    def _claim_review_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "Invalid action token. Refresh the page and try again.",
+            )
+            return
+        if not bool(self.settings.analysis.get("claim_review_enabled", True)):
+            self._error(
+                HTTPStatus.BAD_REQUEST,
+                "Structural claim review is disabled.",
+            )
+            return
+
+        claim_raw = str(data.get("claim_id") or "").strip()
+        try:
+            claim_id = int(claim_raw) if claim_raw else None
+        except ValueError:
+            self._error(HTTPStatus.BAD_REQUEST, "Invalid claim id")
+            return
+
+        if claim_id is not None:
+            claim = self.db.get_evidence_item(claim_id)
+            if claim is None or claim["kind"] != "claim":
+                self._error(HTTPStatus.NOT_FOUND, "Claim candidate not found")
+                return
+            limit = None
+        else:
+            try:
+                limit = int(
+                    str(data.get("limit") or "").strip()
+                    or self.settings.analysis.get("claim_review_batch_size", 8)
+                    or 8
+                )
+            except (TypeError, ValueError):
+                self._error(HTTPStatus.BAD_REQUEST, "Invalid review batch size")
+                return
+            limit = max(1, min(50, limit))
+
+        try:
+            action = self.server.actions.start_claim_review(
+                evidence_id=claim_id,
+                limit=limit,
+            )
+        except ActionBusyError as exc:
+            self._error(HTTPStatus.CONFLICT, str(exc))
+            return
+
+        if self.headers.get("X-Requested-With") == "fetch":
+            self._json({"action": action}, status=HTTPStatus.ACCEPTED)
+            return
+
+        target = f"/claims?claim={claim_id}" if claim_id is not None else "/claims"
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", target)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _taxonomy_label_action(self) -> None:
         data = self._form_data()
