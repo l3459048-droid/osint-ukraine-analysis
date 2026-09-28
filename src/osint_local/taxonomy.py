@@ -1115,35 +1115,47 @@ def _materialize_topics(
     should_pause: Callable[[], bool] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    document_by_id = {str(item["id"]): item for item in documents}
+    background_df = _document_frequency(documents)
+    background_docs = max(1, len(documents))
     candidates: list[dict[str, Any]] = []
+
     for cluster in clusters:
         member_ids = sorted(str(item["id"]) for item in cluster["members"])
+        document_ids = sorted(_cluster_document_ids(cluster))
         key = "topic-" + hashlib.sha1("\n".join(member_ids).encode("utf-8")).hexdigest()[:12]
         representatives = sorted(
             cluster["members"],
             key=lambda item: _dot(item["vector"], cluster["vector"]),
             reverse=True,
-        )[:3]
+        )[:5]
         texts = [
-            document_by_id[str(item["id"])]["text"]
+            str(item.get("text") or "").strip()
             for item in representatives
-            if document_by_id[str(item["id"])]["text"]
+            if str(item.get("text") or "").strip()
         ]
-        keywords = _keywords(texts)
+        keywords = _keywords(
+            texts,
+            background_df=background_df,
+            background_docs=background_docs,
+        )
+        cohesion = _cluster_cohesion(cluster)
+        document_ratio = len(document_ids) / max(1, background_docs)
         candidates.append(
             {
                 "key": key,
+                "kind": "topic",
                 "name": _fallback_name(keywords, "Discovered Topic"),
-                "description": _fallback_description("topic", len(member_ids), keywords),
+                "description": _fallback_description("topic", len(document_ids), keywords),
                 "keywords": keywords,
                 "vector": list(cluster["vector"]),
-                "document_count": len(member_ids),
+                "document_count": len(document_ids),
+                "document_ratio": document_ratio,
+                "cohesion": cohesion,
                 "representatives": [
-                    str(item.get("source_path") or item["id"])
+                    str(item.get("source_path") or item.get("document_id") or item["id"])
                     for item in representatives
                 ],
-                "snippets": [text[:600] for text in texts[:3]],
+                "snippets": [text[:700] for text in texts[:4]],
                 "cluster": cluster,
             }
         )
@@ -1175,6 +1187,7 @@ def _materialize_topics(
     return candidates
 
 
+
 def _materialize_categories(
     clusters: list[dict[str, Any]],
     topics: list[dict[str, Any]],
@@ -1200,7 +1213,7 @@ def _materialize_categories(
             ]
         )
         documents = {
-            str(member["id"])
+            str(member.get("document_id") or member["id"])
             for topic in member_topics
             for member in topic["cluster"]["members"]
         }
