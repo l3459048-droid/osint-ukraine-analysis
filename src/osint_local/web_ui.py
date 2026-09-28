@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+from pathlib import Path
 from urllib.parse import urlencode
 
 def _layout(title: str, body: str) -> str:
@@ -14,7 +15,7 @@ def _layout(title: str, body: str) -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.23</span></a><nav>
+<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.24</span></a><nav>
 <a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/corpus-dashboard">Dashboard</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/entities">Entities</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
@@ -234,9 +235,9 @@ def _system_panel(status: dict, csrf_token: str) -> str:
             '<small>' + _e(detail) + '</small></div>' + button + '</div>'
         )
 
-    quality_detail = "One-time ~2 GB model download + INT8 conversion required."
+    quality_detail = "One-time resumable ~2 GB weights download + local INT8 conversion + self-test."
     if quality_ready:
-        quality_detail = "M2M100 418M INT8 ready for suspicious segments."
+        quality_detail = "M2M100 418M INT8 downloaded, converted and self-tested."
         quality_row = quality_benchmark.get("quality") or {}
         fast_row = quality_benchmark.get("fast") or {}
         if quality_row:
@@ -330,11 +331,22 @@ def _translation_panel(
     for row in translations:
         if row["target_lang"] != "ru":
             continue
-        pdf_link = (
-            f'<a class="translation-export" href="/translation-export/{_e(sha256)}/{_e(row["source_lang"])}/ru/pdf-layout" download>PDF · layout</a>'
-            if str(source_extension or "").casefold() == ".pdf"
-            else ""
-        )
+        pdf_link = ""
+        if str(source_extension or "").casefold() == ".pdf":
+            output_path = Path(str(row["output_path"] or ""))
+            layout_translation_path = output_path.with_suffix(".layout.json")
+            if layout_translation_path.is_file():
+                pdf_link = (
+                    f'<a class="translation-export" href="/translation-export/{_e(sha256)}/{_e(row["source_lang"])}/ru/pdf-layout" download>PDF · layout</a>'
+                )
+            elif quality_ready:
+                pdf_link = (
+                    '<span class="panel-subtle">PDF · layout: run this document with Quality first</span>'
+                )
+            else:
+                pdf_link = (
+                    '<span class="panel-subtle">PDF · layout requires Prepare Quality</span>'
+                )
         rows.append(
             f'<div class="translation-entry">'
             f'<a class="translation-item" href="/translation/{_e(sha256)}/{_e(row["source_lang"])}/ru" target="_blank">'
