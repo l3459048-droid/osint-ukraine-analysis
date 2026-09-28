@@ -165,6 +165,8 @@ DEFAULT_CONFIG = {
         "extract_dates": True,
         "extract_entities": True,
         "extract_metrics": True,
+        "extract_claims": True,
+        "max_claims_per_chunk": 12,
         "batch_size": 500,
         "context_chars": 140,
         "max_evidence_per_chunk": 80,
