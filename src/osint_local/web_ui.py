@@ -1019,6 +1019,8 @@ def _document_evidence_panel(rows) -> str:
     for row in rows[:40]:
         page = row["page"]
         label = str(row["value"])
+        if row["kind"] == "claim" and len(label) > 90:
+            label = label[:87].rstrip() + "…"
         suffix = f" · p.{int(page)}" if page is not None else ""
         badges.append(
             f'<a class="badge" href="/analysis?{urlencode({"kind": row["kind"], "value": row["normalized_value"]})}">'
