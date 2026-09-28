@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.21
+# OSINT Ukraine Analysis — local-first v0.9.22
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.21
+## Что делает v0.9.22
 
 ```text
 папка документов
@@ -98,6 +98,24 @@ osint-local translate <SHA256> --from auto
 ```
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
+
+## Corpus Dashboard v0.9.22
+
+Для больших библиотек добавлена отдельная read-only страница **Dashboard**. Она строится только по уже сохранённым SQLite/metadata/translation artifacts и не запускает повторно OCR, semantic indexing или перевод.
+
+Dashboard показывает:
+
+- состав корпуса по языкам и типам файлов;
+- количество PDF-страниц и chunks;
+- semantic coverage текущей embedding-модели;
+- extraction methods, OCR probes/selected OCR pages и layout-aware pages;
+- страницы и документы с extraction quality ниже текущего OCR quality threshold;
+- покрытие EN/UK → RU переводом;
+- используемые translation engines;
+- суммарные quality warnings, retries/fallbacks и protected-literal fallbacks из translation metadata;
+- список **Needs attention** для processing errors, low-quality extraction и translation quality warnings.
+
+Это операционный слой контроля качества корпуса: он помогает понять, что именно не доиндексировано, не переведено или требует ручной проверки, не меняя исходные документы и не пересобирая taxonomy.
 
 ## Corpus Evidence / Timeline / Entity Explorer v0.9.21
 
