@@ -174,5 +174,15 @@
     "full_rebuild_after_incremental_refreshes": 20,
     "topic_manual_override_similarity": 0.9,
     "category_manual_override_similarity": 0.86
+  },
+  "analysis": {
+    "enabled": true,
+    "auto_rebuild": true,
+    "extract_dates": true,
+    "extract_entities": true,
+    "extract_metrics": true,
+    "batch_size": 500,
+    "context_chars": 140,
+    "max_evidence_per_chunk": 80
   }
 }
