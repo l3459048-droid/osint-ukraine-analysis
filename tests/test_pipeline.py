@@ -5104,3 +5104,123 @@ def test_web_entity_explorer_shows_relationship_evidence(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_corpus_claim_candidates_keep_provenance_and_type():
+    from osint_local.corpus_analysis import extract_chunk_evidence
+
+    text = (
+        "According to the Ministry, the programme will require 240 credits "
+        "and will start on 01.09.2026. "
+        "The programme should provide practical training for all students."
+    )
+    items = extract_chunk_evidence(
+        text,
+        document_sha256="a" * 64,
+        chunk_id=42,
+        page=7,
+    )
+    claims = [item for item in items if item["kind"] == "claim"]
+
+    assert len(claims) == 2
+    assert claims[0]["subtype"] == "attributed_candidate"
+    assert claims[1]["subtype"] == "recommendation_candidate"
+    assert claims[0]["page"] == 7
+    assert claims[0]["chunk_id"] == 42
+    assert "01.09.2026" in claims[0]["value"]
+    assert claims[0]["start_offset"] < claims[0]["end_offset"]
+    assert "According to the Ministry" in claims[0]["context"]
+    metadata = json.loads(claims[0]["metadata_json"])
+    assert metadata["candidate"] is True
+    assert metadata["method"] == "declarative_rule_v1"
+
+
+def test_corpus_analysis_links_entity_to_claim_candidate(tmp_path: Path):
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "relations-claim.txt"
+    source.write_text(
+        "NATO stated that the programme will require 240 credits "
+        "and will start on 01.09.2026.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        result = pipeline.process_file(source)
+        analysis = build_corpus_evidence(
+            pipeline.db,
+            settings.analysis,
+        )
+        assert analysis["claims"] >= 1
+
+        claims = pipeline.db.list_evidence(kind="claim", limit=20)
+        assert claims
+        assert claims[0]["document_sha256"] == result.sha256
+
+        related = pipeline.db.entity_related_values(
+            "NATO",
+            kind="claim",
+            limit=20,
+        )
+        assert related
+        assert "programme will require 240 credits" in related[0]["sample_value"]
+        assert int(related[0]["documents"]) == 1
+        assert int(related[0]["shared_chunks"]) == 1
+    finally:
+        pipeline.close()
+
+
+def test_web_analysis_and_entities_show_claim_candidates(tmp_path: Path):
+    import urllib.request
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "claim-web.txt"
+    source.write_text(
+        "NATO stated that the programme will require 240 credits "
+        "and will start on 01.09.2026.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(
+            base + "/analysis?kind=claim",
+            timeout=5,
+        ) as response:
+            analysis_body = response.read().decode("utf-8")
+        assert "Claim candidates" in analysis_body
+        assert "programme will require 240 credits" in analysis_body
+
+        with urllib.request.urlopen(
+            base + "/entities?entity=NATO",
+            timeout=5,
+        ) as response:
+            entity_body = response.read().decode("utf-8")
+        assert "Related claim candidates" in entity_body
+        assert "programme will require 240 credits" in entity_body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
