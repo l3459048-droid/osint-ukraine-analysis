@@ -790,6 +790,7 @@ def _analysis_panel(
         ("date", "Dates"),
         ("entity", "Entities"),
         ("metric", "Metrics"),
+        ("claim", "Claim candidates"),
     ]
     filters = "".join(
         f'<a class="chip{" active" if selected_kind == key else ""}" '
@@ -823,11 +824,12 @@ def _analysis_panel(
 {_stat_card("Dates", counts.get("date", 0))}
 {_stat_card("Entities", counts.get("entity", 0))}
 {_stat_card("Metrics", counts.get("metric", 0))}
+{_stat_card("Claim candidates", counts.get("claim", 0))}
 </section>
 <section class="panel">
 <div class="panel-head"><div><h2>Corpus Analysis</h2><span class="panel-subtle">{_e(status)}</span></div>
 <form action="/actions/analysis" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{disabled}>Analyze corpus</button></form></div>
-<div class="ask-filter-note">Deterministic evidence extraction preserves provenance: document → page → chunk → local character offsets. It does not re-run OCR or translation.</div>
+<div class="ask-filter-note">Deterministic evidence extraction preserves provenance: document → page → chunk → local character offsets. Claim results are heuristic candidates, not independently verified facts. Analysis does not re-run OCR or translation.</div>
 <div class="filters">{filters}</div>{selected_note}
 </section>
 <section class="panel"><div class="panel-head"><h2>Top evidence</h2><span class="panel-subtle">Documents / mentions</span></div>
@@ -842,6 +844,7 @@ def _entities_panel(
     cooccurrences,
     dates,
     metrics,
+    claims,
     selected_subtype: str = "",
     selected_value: str = "",
 ) -> str:
@@ -899,6 +902,7 @@ def _entities_panel(
 <h3>Related entities</h3><div class="badges">{related_rows(cooccurrences, "entity")}</div>
 <h3>Related dates</h3><div class="badges">{related_rows(dates, "date")}</div>
 <h3>Related metrics</h3><div class="badges">{related_rows(metrics, "metric")}</div>
+<h3>Related claim candidates</h3><div class="badges">{related_rows(claims, "claim")}</div>
 </section>
 <section class="panel"><div class="panel-head"><h2>Entity evidence</h2><span class="panel-subtle">{len(evidence)} occurrence(s)</span></div>
 {_evidence_cards(evidence) if evidence else '<div class="empty">No occurrences found.</div>'}</section>"""
