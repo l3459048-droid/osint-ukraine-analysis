@@ -113,6 +113,7 @@ def build_adaptive_taxonomy(
         documents = _document_vectors(
             db,
             model,
+            taxonomy_config=taxonomy_config,
             should_pause=should_pause,
             progress=progress,
         )
@@ -122,30 +123,55 @@ def build_adaptive_taxonomy(
                 f"{min_documents} are required"
             )
 
-        topic_threshold = float(taxonomy_config.get("topic_similarity", 0.64))
-        topic_merge = float(taxonomy_config.get("topic_merge_similarity", 0.82))
+        topic_threshold = max(
+            float(taxonomy_config.get("topic_similarity", 0.64)),
+            float(taxonomy_config.get("quality_topic_similarity_floor", 0.70)),
+        )
+        topic_merge = max(
+            float(taxonomy_config.get("topic_merge_similarity", 0.82)),
+            float(taxonomy_config.get("quality_topic_merge_floor", 0.86)),
+        )
         min_topic_docs = max(2, int(taxonomy_config.get("min_topic_documents", 2) or 2))
         max_topics = max(4, int(taxonomy_config.get("max_topics", 80) or 80))
 
         if progress:
             progress(1, 6, "Discovering semantic topics…")
         _wait_while_paused(should_pause, progress)
+        discovery_items = _topic_discovery_items(documents)
         raw_topics = _cluster_items(
-            documents,
+            discovery_items,
             similarity_threshold=topic_threshold,
             merge_threshold=topic_merge,
-            max_clusters=max_topics,
+            max_clusters=0,
+        )
+        refined_topics = _refine_topic_clusters(
+            raw_topics,
+            total_documents=len(documents),
+            similarity_threshold=topic_threshold,
+            merge_threshold=topic_merge,
+            taxonomy_config=taxonomy_config,
         )
         topic_clusters = [
-            cluster for cluster in raw_topics
-            if len(cluster["members"]) >= min_topic_docs
+            cluster for cluster in refined_topics
+            if _cluster_document_count(cluster) >= min_topic_docs
         ]
+        topic_clusters = sorted(
+            topic_clusters,
+            key=lambda item: (
+                -_cluster_document_count(item),
+                -_cluster_cohesion(item),
+                str(item["members"][0]["id"]),
+            ),
+        )[:max_topics]
         if not topic_clusters:
+            fallback_clusters = refined_topics or raw_topics
             topic_clusters = sorted(
-                raw_topics,
-                key=lambda item: len(item["members"]),
-                reverse=True,
-            )[: min(max_topics, max(1, len(raw_topics)))]
+                fallback_clusters,
+                key=lambda item: (
+                    -_cluster_document_count(item),
+                    -_cluster_cohesion(item),
+                ),
+            )[: min(max_topics, max(1, len(fallback_clusters)))]
 
         if progress:
             progress(2, 6, "Naming discovered topics…")
@@ -169,8 +195,14 @@ def build_adaptive_taxonomy(
         if progress:
             progress(3, 6, "Grouping topics into broader categories…")
         _wait_while_paused(should_pause, progress)
-        category_threshold = float(taxonomy_config.get("category_similarity", 0.48))
-        category_merge = float(taxonomy_config.get("category_merge_similarity", 0.70))
+        category_threshold = max(
+            float(taxonomy_config.get("category_similarity", 0.48)),
+            float(taxonomy_config.get("quality_category_similarity_floor", 0.55)),
+        )
+        category_merge = max(
+            float(taxonomy_config.get("category_merge_similarity", 0.70)),
+            float(taxonomy_config.get("quality_category_merge_floor", 0.74)),
+        )
         max_categories = max(2, int(taxonomy_config.get("max_categories", 24) or 24))
         category_items = [
             {
@@ -186,7 +218,13 @@ def build_adaptive_taxonomy(
             category_items,
             similarity_threshold=category_threshold,
             merge_threshold=category_merge,
+            max_clusters=0,
+            weighted=True,
+        )
+        raw_categories = _soft_cap_clusters(
+            raw_categories,
             max_clusters=max_categories,
+            merge_threshold=category_merge,
             weighted=True,
         )
         previous_categories = db.list_taxonomy_categories(limit=1000)
@@ -220,7 +258,8 @@ def build_adaptive_taxonomy(
         primary_topic: dict[str, str] = {}
         for topic in topic_records:
             for member in topic["cluster"]["members"]:
-                primary_topic[str(member["id"])] = topic["key"]
+                document_id = str(member.get("document_id") or member["id"])
+                primary_topic.setdefault(document_id, topic["key"])
 
         assignments = _assign_documents_to_taxonomy(
             documents,
@@ -282,6 +321,7 @@ def build_adaptive_taxonomy(
             taxonomy_config=taxonomy_config,
         )
         details = {
+            "taxonomy_quality_version": TAXONOMY_QUALITY_VERSION,
             "embedding_signature": db.embedding_signature(model),
             "discovery_embedding_signature": db.embedding_signature(model),
             "discovery_document_count": len(documents),
@@ -301,6 +341,19 @@ def build_adaptive_taxonomy(
             "growth_trigger": growth_trigger,
             "unassigned_trigger": unassigned_trigger,
             "documents_with_vectors": len(documents),
+            "topic_discovery_items": len(discovery_items),
+            "mean_topic_cohesion": round(
+                sum(_cluster_cohesion(item) for item in topic_clusters)
+                / max(1, len(topic_clusters)),
+                4,
+            ),
+            "largest_topic_discovery_ratio": round(
+                max(
+                    (_cluster_document_count(item) / max(1, len(documents)))
+                    for item in topic_clusters
+                ),
+                4,
+            ) if topic_clusters else 0.0,
             "assigned_documents": len(assigned_documents),
             "unassigned_documents": max(0, len(documents) - len(assigned_documents)),
             "coverage": round(len(assigned_documents) / max(1, len(documents)), 4),
