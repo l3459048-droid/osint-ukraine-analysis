@@ -696,6 +696,10 @@ def _assign_documents_to_taxonomy(
         0.0,
         float(taxonomy_config.get("broad_topic_assignment_penalty", 0.10)),
     )
+    broad_penalty_min_documents = max(
+        1,
+        int(taxonomy_config.get("broad_topic_penalty_min_documents", 20) or 20),
+    )
     max_topics_per_document = max(
         1,
         int(taxonomy_config.get("max_topics_per_document", 4) or 4),
@@ -715,7 +719,10 @@ def _assign_documents_to_taxonomy(
                 topic.get("document_ratio")
                 or (float(topic.get("document_count") or 0) / total_documents)
             )
-            if discovered_ratio <= broad_ratio_start:
+            if (
+                total_documents < broad_penalty_min_documents
+                or discovered_ratio <= broad_ratio_start
+            ):
                 dynamic_threshold = assignment_threshold
             else:
                 excess = min(
