@@ -1598,7 +1598,7 @@ def _generated_label_is_usable(
             "military", "defense", "defence", "economic", "financial",
             "technology", "technological", "engineering", "subscription",
         }
-        if all(token in generic or token in LABEL_NOISE for token in tokens):
+        if content_tokens and all(token in generic for token in content_tokens):
             return False
 
     return True
