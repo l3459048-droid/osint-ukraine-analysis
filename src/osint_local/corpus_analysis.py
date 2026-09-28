@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import date, datetime, timezone
 from typing import Any, Callable
 
-ANALYZER_VERSION = 1
+ANALYZER_VERSION = 2
 
 DATE_DMY_RE = re.compile(
     r"(?<!\d)(?P<day>\d{1,2})[.\-/](?P<month>\d{1,2})[.\-/](?P<year>(?:19|20|21)\d{2})(?!\d)"
@@ -156,6 +156,36 @@ ORG_KEYWORDS = {
 }
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ][\w’'\-]*", re.UNICODE)
 
+CLAIM_CUE_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|will|can|may|must|should|"
+    r"requires?|provides?|indicates?|shows?|reports?|reported|states?|stated|"
+    r"announced?|according\s+to|"
+    r"є|становить|має|буде|може|повинен|повинна|повинні|слід|"
+    r"вимагає|забезпечує|передбачає|повідомив|повідомила|заявив|заявила|зазначив|зазначила|"
+    r"является|составляет|имеет|будет|может|должен|должна|должны|следует|"
+    r"требует|обеспечивает|предусматривает|сообщил|сообщила|заявил|заявила|указал|указала)\b",
+    re.IGNORECASE,
+)
+ATTRIBUTION_CUE_RE = re.compile(
+    r"\b(?:according\s+to|reports?|reported|states?|stated|announced?|said|"
+    r"повідомив|повідомила|заявив|заявила|зазначив|зазначила|"
+    r"сообщил|сообщила|заявил|заявила|указал|указала)\b",
+    re.IGNORECASE,
+)
+FORECAST_CUE_RE = re.compile(
+    r"\b(?:will|expected|planned|forecast|projected|"
+    r"буде|очікується|планується|прогнозується|"
+    r"будет|ожидается|планируется|прогнозируется)\b",
+    re.IGNORECASE,
+)
+RECOMMENDATION_CUE_RE = re.compile(
+    r"\b(?:should|must|needs?\s+to|requires?|recommended|"
+    r"слід|повинен|повинна|повинні|необхідно|рекомендовано|"
+    r"следует|должен|должна|должны|необходимо|рекомендуется)\b",
+    re.IGNORECASE,
+)
+CLAIM_NOISE_RE = re.compile(r"_{3,}|\.{5,}|(?:\b\w{1,12}_\b\s*){2,}", re.IGNORECASE)
+
 
 def analysis_is_stale(db) -> bool:
     latest = db.latest_corpus_analysis_run()
@@ -199,6 +229,11 @@ def build_corpus_evidence(
     extract_dates = bool(analysis_config.get("extract_dates", True))
     extract_entities = bool(analysis_config.get("extract_entities", True))
     extract_metrics = bool(analysis_config.get("extract_metrics", True))
+    extract_claims = bool(analysis_config.get("extract_claims", True))
+    max_claims_per_chunk = max(
+        1,
+        int(analysis_config.get("max_claims_per_chunk", 12) or 12),
+    )
 
     evidence: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
@@ -222,6 +257,8 @@ def build_corpus_evidence(
                     extract_dates=extract_dates,
                     extract_entities=extract_entities,
                     extract_metrics=extract_metrics,
+                    extract_claims=extract_claims,
+                    max_claims=max_claims_per_chunk,
                 )
                 if len(items) > max_per_chunk:
                     items = sorted(
@@ -279,6 +316,7 @@ def build_corpus_evidence(
             "dates": int(counts.get("date", 0)),
             "entities": int(counts.get("entity", 0)),
             "metrics": int(counts.get("metric", 0)),
+            "claims": int(counts.get("claim", 0)),
             **details,
         }
     except Exception as exc:
@@ -300,6 +338,8 @@ def extract_chunk_evidence(
     extract_dates: bool = True,
     extract_entities: bool = True,
     extract_metrics: bool = True,
+    extract_claims: bool = True,
+    max_claims: int = 12,
 ) -> list[dict[str, Any]]:
     text = str(text or "")
     if not text.strip():
@@ -336,6 +376,17 @@ def extract_chunk_evidence(
                 context_chars=context_chars,
             )
         )
+    if extract_claims:
+        items.extend(
+            _extract_claims(
+                text,
+                document_sha256=document_sha256,
+                chunk_id=chunk_id,
+                page=page,
+                context_chars=context_chars,
+                limit=max(1, int(max_claims)),
+            )
+        )
 
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for item in items:
@@ -357,6 +408,145 @@ def extract_chunk_evidence(
             item.get("subtype", ""),
         ),
     )
+
+
+def _extract_claims(
+    text: str,
+    *,
+    document_sha256: str,
+    chunk_id: int,
+    page: int | None,
+    context_chars: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for start, end, sentence in _sentence_spans(text):
+        compact = re.sub(r"\s+", " ", sentence).strip()
+        if not _is_claim_candidate(compact):
+            continue
+
+        cue = CLAIM_CUE_RE.search(compact)
+        if not cue:
+            continue
+
+        subtype = "assertion_candidate"
+        if ATTRIBUTION_CUE_RE.search(compact):
+            subtype = "attributed_candidate"
+        elif FORECAST_CUE_RE.search(compact):
+            subtype = "forecast_candidate"
+        elif RECOMMENDATION_CUE_RE.search(compact):
+            subtype = "recommendation_candidate"
+
+        confidence = 0.58
+        if DATE_DMY_RE.search(compact) or DATE_YMD_RE.search(compact):
+            confidence += 0.07
+        if DATE_NAMED_DMY_RE.search(compact) or DATE_NAMED_MDY_RE.search(compact):
+            confidence += 0.07
+        if METRIC_RE.search(compact):
+            confidence += 0.07
+        if ORG_KEYWORDS.intersection(
+            token.group(0).casefold() for token in WORD_RE.finditer(compact)
+        ):
+            confidence += 0.05
+        if PERSON_ALLCAPS_RE.search(compact) or PERSON_PATRONYMIC_RE.search(compact):
+            confidence += 0.05
+        if subtype == "attributed_candidate":
+            confidence += 0.06
+
+        candidates.append(
+            _item(
+                text,
+                start,
+                end,
+                document_sha256=document_sha256,
+                chunk_id=chunk_id,
+                page=page,
+                kind="claim",
+                subtype=subtype,
+                value=compact,
+                normalized_value=_normalize_claim(compact),
+                confidence=min(0.86, confidence),
+                context_chars=context_chars,
+                metadata={
+                    "method": "declarative_rule_v1",
+                    "cue": cue.group(0),
+                    "candidate": True,
+                },
+            )
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            -float(item["confidence"]),
+            int(item["start_offset"]),
+        )
+    )
+    selected = candidates[:limit]
+    selected.sort(key=lambda item: int(item["start_offset"]))
+    return selected
+
+
+def _sentence_spans(text: str):
+    length = len(text)
+    start = 0
+    index = 0
+    while index < length:
+        boundary = False
+        char = text[index]
+        if char in ".!?":
+            next_index = index + 1
+            boundary = next_index >= length or text[next_index].isspace()
+        elif char == "\n" and index + 1 < length and text[index + 1] == "\n":
+            boundary = True
+
+        if boundary:
+            end = index + 1
+            raw = text[start:end]
+            left_trim = len(raw) - len(raw.lstrip())
+            right_trimmed = raw.rstrip()
+            sentence_start = start + left_trim
+            sentence_end = start + len(right_trimmed)
+            if sentence_end > sentence_start:
+                yield sentence_start, sentence_end, text[sentence_start:sentence_end]
+            index += 1
+            while index < length and text[index].isspace():
+                index += 1
+            start = index
+            continue
+        index += 1
+
+    if start < length:
+        raw = text[start:]
+        left_trim = len(raw) - len(raw.lstrip())
+        right_trimmed = raw.rstrip()
+        sentence_start = start + left_trim
+        sentence_end = start + len(right_trimmed)
+        if sentence_end > sentence_start:
+            yield sentence_start, sentence_end, text[sentence_start:sentence_end]
+
+
+def _is_claim_candidate(sentence: str) -> bool:
+    if not 45 <= len(sentence) <= 520:
+        return False
+    words = WORD_RE.findall(sentence)
+    if not 7 <= len(words) <= 90:
+        return False
+    if CLAIM_NOISE_RE.search(sentence):
+        return False
+    letters = [char for char in sentence if char.isalpha()]
+    if letters:
+        uppercase = sum(char.isupper() for char in letters)
+        if len(sentence) < 180 and uppercase / len(letters) > 0.72:
+            return False
+    if sentence.rstrip().endswith(":"):
+        return False
+    return bool(CLAIM_CUE_RE.search(sentence))
+
+
+def _normalize_claim(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    value = value.rstrip(" .!?;:")
+    return value.casefold()
 
 
 def _extract_dates(
