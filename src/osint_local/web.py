@@ -48,6 +48,7 @@ from .web_ui import (
     _chat_messages,
     _chat_panel,
     _chunk_card,
+    _claims_panel,
     _classification_badges,
     _document_cards,
     _document_evidence_panel,
@@ -689,6 +690,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._taxonomy_page(query)
             elif path == "/analysis":
                 self._analysis_page(query)
+            elif path == "/claims":
+                self._claims_page(query)
             elif path == "/entities":
                 self._entities_page(query)
             elif path == "/timeline":
@@ -1068,6 +1071,69 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
         ]
         self._html("Analysis", "".join(body))
+
+    def _claims_page(self, query: dict[str, list[str]]) -> None:
+        subtype = _first(query, "subtype").strip().casefold()
+        allowed_subtypes = {
+            "",
+            "assertion_candidate",
+            "attributed_candidate",
+            "forecast_candidate",
+            "recommendation_candidate",
+        }
+        if subtype not in allowed_subtypes:
+            subtype = ""
+        category_key = _first(query, "category").strip()
+        topic_key = _first(query, "topic").strip()
+        claim_raw = _first(query, "claim").strip()
+        try:
+            claim_id = int(claim_raw) if claim_raw else 0
+        except ValueError:
+            claim_id = 0
+
+        claims = self.db.list_evidence(
+            kind="claim",
+            subtype=subtype or None,
+            category_key=category_key or None,
+            topic_key=topic_key or None,
+            limit=500,
+        )
+        selected_claim = self.db.get_evidence_item(claim_id) if claim_id else None
+        if selected_claim is not None and selected_claim["kind"] != "claim":
+            selected_claim = None
+
+        related_entities = (
+            self.db.claim_related_values(claim_id, kind="entity", limit=100)
+            if selected_claim is not None else []
+        )
+        related_dates = (
+            self.db.claim_related_values(claim_id, kind="date", limit=100)
+            if selected_claim is not None else []
+        )
+        related_metrics = (
+            self.db.claim_related_values(claim_id, kind="metric", limit=100)
+            if selected_claim is not None else []
+        )
+
+        body = [
+            _page_header(
+                "Claims",
+                "Candidate assertions extracted from evidence-rich sentences. Verify every candidate against its source.",
+            ),
+            _claims_panel(
+                claims=claims,
+                categories=self.db.list_taxonomy_categories(limit=200),
+                topics=self.db.list_taxonomy_topics(limit=500),
+                selected_claim=selected_claim,
+                related_entities=related_entities,
+                related_dates=related_dates,
+                related_metrics=related_metrics,
+                selected_subtype=subtype,
+                selected_category=category_key,
+                selected_topic=topic_key,
+            ),
+        ]
+        self._html("Claims", "".join(body))
 
     def _entities_page(self, query: dict[str, list[str]]) -> None:
         subtype = _first(query, "subtype").strip().casefold()
