@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .claim_review import review_claim_candidate, review_claim_candidates
 from .corpus_analysis import analysis_is_stale, build_corpus_evidence
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
@@ -76,6 +77,20 @@ class ActionManager:
     def start_analysis(self) -> dict[str, Any]:
         return self._start("analysis", self._run_analysis)
 
+    def start_claim_review(
+        self,
+        *,
+        evidence_id: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        return self._start(
+            "claim-review",
+            lambda: self._run_claim_review(
+                evidence_id=evidence_id,
+                limit=limit,
+            ),
+        )
+
     def _start(self, kind: str, target: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
             if self._state.status == "running":
@@ -113,6 +128,7 @@ class ActionManager:
                 "translate": "Translation complete",
                 "taxonomy": "Taxonomy complete",
                 "analysis": "Corpus analysis complete",
+                "claim-review": "Claim review complete",
             }
             if self._state.kind == "maintenance" and result.get("paused"):
                 self._state.message = "Background paused for interactive work"
@@ -187,6 +203,41 @@ class ActionManager:
             self.pipeline.db,
             self.pipeline.settings.analysis,
             progress=progress,
+            should_pause=self.interactive_busy,
+        )
+
+    def _run_claim_review(
+        self,
+        *,
+        evidence_id: int | None,
+        limit: int | None,
+    ) -> dict[str, Any]:
+        settings = self.pipeline.settings
+        if evidence_id is not None:
+            self._progress(0, 1, "Reviewing claim structure…")
+            review = review_claim_candidate(
+                self.pipeline.db,
+                int(evidence_id),
+                settings.qa,
+                settings.analysis,
+            )
+            self._progress(1, 1, "Claim structure reviewed")
+            return {
+                "reviewed": 1,
+                "reviewed_ids": [int(evidence_id)],
+                "review": review,
+            }
+
+        return review_claim_candidates(
+            self.pipeline.db,
+            settings.qa,
+            settings.analysis,
+            limit=limit,
+            progress=lambda current, total, message: self._progress(
+                current,
+                total,
+                message,
+            ),
             should_pause=self.interactive_busy,
         )
 
