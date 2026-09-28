@@ -108,17 +108,21 @@ osint-local translate <SHA256> --from auto
 - **Dates** — числовые и month-name calendar dates с нормализацией к ISO;
 - **Metrics** — проценты, длительности, расстояния, массы, валюты, кредиты/ECTS и другие number+unit факты;
 - **Entities** — базовые person / organization / acronym candidates;
+- **Claim candidates** — declarative sentence candidates с типами `assertion`, `attributed`, `forecast`, `recommendation`;
 - для каждого evidence сохраняется точная связь:
   `document_sha256 → page → chunk_id/chunk_index → local character offsets → context`.
 
+Claim extraction детерминированный и multilingual (EN / UK / RU). Это **кандидаты утверждений, а не проверенные факты**: система не делает вывод об истинности предложения только потому, что оно попало в Claims.
+
 Web UI получил:
 
-- **Analysis** — counts, top values и все evidence occurrences;
+- **Analysis** — counts, top values и все evidence occurrences, включая Claim candidates;
+- **Claims** — отдельный explorer с фильтрами subtype / adaptive category / topic, просмотром выбранного claim и прямой ссылкой на source evidence;
 - **Timeline** — даты из содержания документов в хронологическом порядке, с фильтрами adaptive category/topic;
-- **Entities** — people / organizations / acronyms и консервативные shared-chunk связи entity ↔ entity/date/metric;
+- **Entities** — people / organizations / acronyms и консервативные shared-chunk связи entity ↔ entity/date/metric/claim;
 - на странице документа — компактный блок **Evidence** с переходом к corpus analysis.
 
-Entity relationships сейчас означают **совместное появление в одном chunk**, а не причинность. Это намеренно conservative foundation для следующего слоя claims/relations.
+Relations сейчас означают **совместное появление в одном chunk**, а не причинность. Entity→claim показывает только общий evidence-context. Claim confidence — эвристическая оценка качества candidate extraction, а не вероятность истинности.
 
 Анализ автоматически обновляется только когда меняется chunk fingerprint; Chat/Ask могут приостанавливать фоновый analysis на безопасных границах batch.
 
