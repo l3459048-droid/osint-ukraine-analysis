@@ -1269,6 +1269,12 @@ def _materialize_categories(
     progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict[str, Any]]:
     topic_by_key = {topic["key"]: topic for topic in topics}
+    corpus_documents = {
+        str(member.get("document_id") or member["id"])
+        for topic in topics
+        for member in topic["cluster"]["members"]
+    }
+    corpus_document_count = max(1, len(corpus_documents))
     candidates: list[dict[str, Any]] = []
     for cluster in clusters:
         topic_keys = sorted(str(item["id"]) for item in cluster["members"])
@@ -1294,7 +1300,7 @@ def _materialize_categories(
                 "keywords": keywords,
                 "vector": list(cluster["vector"]),
                 "document_count": len(documents),
-                "document_ratio": 0.0,
+                "document_ratio": len(documents) / corpus_document_count,
                 "cohesion": _cluster_cohesion(cluster),
                 "topic_keys": topic_keys,
                 "representatives": [topic["name"] for topic in member_topics[:6]],
