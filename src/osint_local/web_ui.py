@@ -828,13 +828,124 @@ def _analysis_panel(
 </section>
 <section class="panel">
 <div class="panel-head"><div><h2>Corpus Analysis</h2><span class="panel-subtle">{_e(status)}</span></div>
-<form action="/actions/analysis" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{disabled}>Analyze corpus</button></form></div>
+<div class="doc-actions"><a class="button secondary" href="/claims">Claims</a><form action="/actions/analysis" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><button type="submit"{disabled}>Analyze corpus</button></form></div></div>
 <div class="ask-filter-note">Deterministic evidence extraction preserves provenance: document → page → chunk → local character offsets. Claim results are heuristic candidates, not independently verified facts. Analysis does not re-run OCR or translation.</div>
 <div class="filters">{filters}</div>{selected_note}
 </section>
 <section class="panel"><div class="panel-head"><h2>Top evidence</h2><span class="panel-subtle">Documents / mentions</span></div>
 <div class="two-col">{"".join(top_sections)}</div></section>
 <section class="panel"><div class="panel-head"><h2>Evidence occurrences</h2><span class="panel-subtle">{len(evidence)} shown</span></div>{evidence_html}</section>"""
+
+
+def _claims_panel(
+    *,
+    claims,
+    categories,
+    topics,
+    selected_claim,
+    related_entities,
+    related_dates,
+    related_metrics,
+    selected_subtype: str = "",
+    selected_category: str = "",
+    selected_topic: str = "",
+) -> str:
+    subtype_options = '<option value="">All claim types</option>' + "".join(
+        f'<option value="{_e(value)}"{" selected" if value == selected_subtype else ""}>{_e(label)}</option>'
+        for value, label in (
+            ("assertion_candidate", "Assertion"),
+            ("attributed_candidate", "Attributed"),
+            ("forecast_candidate", "Forecast"),
+            ("recommendation_candidate", "Recommendation"),
+        )
+    )
+    category_options = '<option value="">All adaptive categories</option>' + "".join(
+        f'<option value="{_e(row["category_key"])}"{" selected" if str(row["category_key"]) == selected_category else ""}>'
+        f'{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in categories
+    )
+    topic_options = '<option value="">All topics</option>' + "".join(
+        f'<option value="{_e(row["topic_key"])}"{" selected" if str(row["topic_key"]) == selected_topic else ""}>'
+        f'{_e(row["name"])} ({int(row["document_count"])})</option>'
+        for row in topics
+    )
+
+    cards = []
+    for row in claims:
+        page = row["page"]
+        if page is not None:
+            evidence_target = f'/documents/{row["document_sha256"]}?page={int(page)}#reader'
+            location = f'{row["source_path"]} · page {int(page)}'
+        else:
+            evidence_target = f'/documents/{row["document_sha256"]}#chunk-{int(row["chunk_index"] or 0)}'
+            location = f'{row["source_path"]} · chunk {int(row["chunk_index"] or 0)}'
+        inspect_params = {"claim": int(row["id"])}
+        if selected_subtype:
+            inspect_params["subtype"] = selected_subtype
+        if selected_category:
+            inspect_params["category"] = selected_category
+        if selected_topic:
+            inspect_params["topic"] = selected_topic
+        cards.append(
+            f'<article class="result">'
+            f'<div class="result-meta"><span class="score">{float(row["confidence"]):.2f}</span>'
+            f'<span>{_e(row["subtype"])}</span><span>{_e(location)}</span></div>'
+            f'<h3><a href="/claims?{urlencode(inspect_params)}">{_e(row["value"])}</a></h3>'
+            f'<p>{_e(row["context"])}</p>'
+            f'<div class="result-actions"><a href="/claims?{urlencode(inspect_params)}">Inspect claim</a>'
+            f'<a href="{evidence_target}">Open evidence</a></div>'
+            f'</article>'
+        )
+    claims_html = (
+        '<section class="results">' + "".join(cards) + "</section>"
+        if cards else '<div class="empty">No claim candidates in this filter.</div>'
+    )
+
+    def relation_chips(rows, kind: str) -> str:
+        if not rows:
+            return '<span class="translation-empty">No related evidence in this chunk.</span>'
+        parts = []
+        for row in rows[:30]:
+            if kind == "entity":
+                href = "/entities?" + urlencode({"entity": row["normalized_value"]})
+            elif kind == "date":
+                href = "/timeline?" + urlencode({"date": row["normalized_value"]})
+            else:
+                href = "/analysis?" + urlencode(
+                    {"kind": kind, "value": row["normalized_value"]}
+                )
+            parts.append(
+                f'<a class="badge" href="{href}">{_e(row["sample_value"])} '
+                f'<b>{int(row["mentions"])}</b></a>'
+            )
+        return "".join(parts)
+
+    detail = ""
+    if selected_claim:
+        page = selected_claim["page"]
+        location = str(selected_claim["source_path"])
+        if page is not None:
+            location += f" · page {int(page)}"
+        detail = f"""<section class="panel">
+<div class="panel-head"><div><h2>Selected claim</h2><span class="panel-subtle">{_e(location)} · confidence {float(selected_claim["confidence"]):.2f}</span></div></div>
+<p>{_e(selected_claim["value"])}</p>
+<h3>Entities in the same chunk</h3><div class="badges">{relation_chips(related_entities, "entity")}</div>
+<h3>Dates in the same chunk</h3><div class="badges">{relation_chips(related_dates, "date")}</div>
+<h3>Metrics in the same chunk</h3><div class="badges">{relation_chips(related_metrics, "metric")}</div>
+</section>"""
+
+    return f"""<section class="panel">
+<div class="panel-head"><div><h2>Claims Explorer</h2><span class="panel-subtle">Candidate assertions with direct evidence provenance</span></div><a href="/analysis">Back to Analysis</a></div>
+<form class="search-form" action="/claims" method="get">
+<select name="subtype">{subtype_options}</select>
+<select name="category">{category_options}</select>
+<select name="topic">{topic_options}</select>
+<button type="submit">Filter</button>
+</form>
+<div class="ask-filter-note">These are conservative claim candidates extracted from declarative sentences. A candidate is not automatically treated as true; use the linked source evidence for verification.</div>
+</section>
+{detail}
+<section class="panel"><div class="panel-head"><h2>Claim candidates</h2><span class="panel-subtle">{len(claims)} shown</span></div>{claims_html}</section>"""
 
 
 def _entities_panel(
