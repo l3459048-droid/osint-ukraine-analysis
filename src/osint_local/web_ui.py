@@ -15,7 +15,7 @@ def _layout(title: str, body: str) -> str:
 </head>
 <body>
 <header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.20</span></a><nav>
-<a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
+<a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/entities">Entities</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
 <footer>Local-first · source files stay on this computer</footer>
@@ -833,6 +833,83 @@ def _analysis_panel(
 <section class="panel"><div class="panel-head"><h2>Top evidence</h2><span class="panel-subtle">Documents / mentions</span></div>
 <div class="two-col">{"".join(top_sections)}</div></section>
 <section class="panel"><div class="panel-head"><h2>Evidence occurrences</h2><span class="panel-subtle">{len(evidence)} shown</span></div>{evidence_html}</section>"""
+
+
+def _entities_panel(
+    *,
+    entities,
+    evidence,
+    cooccurrences,
+    dates,
+    metrics,
+    selected_subtype: str = "",
+    selected_value: str = "",
+) -> str:
+    filters = "".join(
+        f'<a class="chip{" active" if selected_subtype == key else ""}" '
+        f'href="/entities{("?" + urlencode({"subtype": key})) if key else ""}">{_e(label)}</a>'
+        for key, label in (
+            ("", "All"),
+            ("person", "People"),
+            ("organization", "Organizations"),
+            ("acronym", "Acronyms"),
+        )
+    )
+
+    entity_rows = []
+    for row in entities:
+        params = {"entity": row["normalized_value"]}
+        if selected_subtype:
+            params["subtype"] = selected_subtype
+        active = " active" if row["normalized_value"] == selected_value else ""
+        entity_rows.append(
+            f'<a class="doc-card{active}" href="/entities?{urlencode(params)}"><div>'
+            f'<strong>{_e(row["sample_value"])}</strong>'
+            f'<span>{_e(row["subtype"])} · {int(row["documents"])} document(s) · {int(row["mentions"])} mention(s)</span>'
+            f'</div><span class="arrow">→</span></a>'
+        )
+    entity_html = (
+        '<div class="doc-list">' + "".join(entity_rows) + "</div>"
+        if entity_rows else '<div class="empty">No extracted entities in this view.</div>'
+    )
+
+    def related_rows(rows, kind: str) -> str:
+        if not rows:
+            return '<span class="translation-empty">No shared-chunk evidence yet.</span>'
+        parts = []
+        for row in rows[:30]:
+            if kind == "entity":
+                href = "/entities?" + urlencode({"entity": row["normalized_value"]})
+            elif kind == "date":
+                href = "/timeline?" + urlencode({"date": row["normalized_value"]})
+            else:
+                href = "/analysis?" + urlencode(
+                    {"kind": kind, "value": row["normalized_value"]}
+                )
+            parts.append(
+                f'<a class="badge" href="{href}">{_e(row["sample_value"])} '
+                f'<b>{int(row["documents"])}d/{int(row["shared_chunks"])}c</b></a>'
+            )
+        return "".join(parts)
+
+    detail = ""
+    if selected_value:
+        detail = f"""<section class="panel">
+<div class="panel-head"><div><h2>{_e(selected_value)}</h2><span class="panel-subtle">Shared-chunk relationships · d=documents · c=chunks</span></div></div>
+<h3>Related entities</h3><div class="badges">{related_rows(cooccurrences, "entity")}</div>
+<h3>Related dates</h3><div class="badges">{related_rows(dates, "date")}</div>
+<h3>Related metrics</h3><div class="badges">{related_rows(metrics, "metric")}</div>
+</section>
+<section class="panel"><div class="panel-head"><h2>Entity evidence</h2><span class="panel-subtle">{len(evidence)} occurrence(s)</span></div>
+{_evidence_cards(evidence) if evidence else '<div class="empty">No occurrences found.</div>'}</section>"""
+
+    return f"""<section class="panel">
+<div class="panel-head"><div><h2>Entity Explorer</h2><span class="panel-subtle">{len(entities)} entity value(s) shown</span></div></div>
+<div class="ask-filter-note">Relationships are conservative co-occurrences inside the same extracted chunk. They indicate shared evidence context, not causality.</div>
+<div class="filters">{filters}</div>
+</section>
+<section class="panel"><div class="panel-head"><h2>Entities</h2><span class="panel-subtle">People · organizations · acronyms</span></div>{entity_html}</section>
+{detail}"""
 
 
 def _timeline_panel(
