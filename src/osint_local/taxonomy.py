@@ -653,45 +653,68 @@ def _assign_documents_to_taxonomy(
     assigned_documents: set[str] = set()
     topic_documents: dict[str, set[str]] = defaultdict(set)
     category_documents: dict[str, set[str]] = defaultdict(set)
-    assignment_threshold = float(
-        taxonomy_config.get("topic_assignment_similarity", 0.68)
+
+    assignment_threshold = max(
+        float(taxonomy_config.get("topic_assignment_similarity", 0.68)),
+        float(taxonomy_config.get("quality_assignment_floor", 0.70)),
+    )
+    secondary_margin = max(
+        0.0,
+        float(taxonomy_config.get("topic_secondary_margin", 0.18)),
+    )
+    broad_ratio_start = max(
+        0.0,
+        min(0.95, float(taxonomy_config.get("broad_topic_ratio_start", 0.25))),
+    )
+    broad_penalty_max = max(
+        0.0,
+        float(taxonomy_config.get("broad_topic_assignment_penalty", 0.10)),
     )
     max_topics_per_document = max(
         1,
         int(taxonomy_config.get("max_topics_per_document", 4) or 4),
     )
-    topic_lookup = {topic["key"]: topic for topic in topic_records}
     category_lookup = {
         category["key"]: category
         for category in category_records
     }
-    primary_topic = primary_topic or {}
+    total_documents = max(1, len(documents))
 
     for document in documents:
         sha256 = str(document["id"])
-        scored_topics = sorted(
-            (
-                (_dot(document["vector"], topic["vector"]), topic)
-                for topic in topic_records
-            ),
-            key=lambda item: item[0],
-            reverse=True,
-        )
-        selected: list[tuple[float, dict[str, Any]]] = [
-            (score, topic)
-            for score, topic in scored_topics
-            if score >= assignment_threshold
-        ][:max_topics_per_document]
-
-        primary_key = primary_topic.get(sha256)
-        if primary_key and all(
-            topic["key"] != primary_key for _, topic in selected
-        ):
-            primary = topic_lookup.get(primary_key)
-            if primary is not None:
-                selected.append(
-                    (_dot(document["vector"], primary["vector"]), primary)
+        scored_topics: list[tuple[float, float, dict[str, Any]]] = []
+        for topic in topic_records:
+            score = _document_similarity(document, topic["vector"])
+            discovered_ratio = float(
+                topic.get("document_ratio")
+                or (float(topic.get("document_count") or 0) / total_documents)
+            )
+            if discovered_ratio <= broad_ratio_start:
+                dynamic_threshold = assignment_threshold
+            else:
+                excess = min(
+                    1.0,
+                    (discovered_ratio - broad_ratio_start)
+                    / max(0.01, 1.0 - broad_ratio_start),
                 )
+                dynamic_threshold = min(
+                    0.95,
+                    assignment_threshold + broad_penalty_max * excess,
+                )
+            scored_topics.append((score, dynamic_threshold, topic))
+
+        scored_topics.sort(key=lambda item: item[0], reverse=True)
+        selected: list[tuple[float, dict[str, Any]]] = []
+        if scored_topics:
+            best_score = scored_topics[0][0]
+            for index, (score, threshold, topic) in enumerate(scored_topics):
+                if score < threshold:
+                    continue
+                if index > 0 and best_score - score > secondary_margin:
+                    continue
+                selected.append((score, topic))
+                if len(selected) >= max_topics_per_document:
+                    break
 
         for score, topic in selected:
             score = max(0.0, float(score))
@@ -704,7 +727,7 @@ def _assign_documents_to_taxonomy(
             if category_key and category is not None:
                 category_score = max(
                     0.0,
-                    _dot(document["vector"], category["vector"]),
+                    _document_similarity(document, category["vector"]),
                 )
                 key = (sha256, category_key)
                 category_scores[key] = max(
@@ -734,6 +757,19 @@ def _assign_documents_to_taxonomy(
         "assignment_threshold": assignment_threshold,
         "max_topics_per_document": max_topics_per_document,
     }
+
+
+def _document_similarity(
+    document: dict[str, Any],
+    target_vector: Sequence[float],
+) -> float:
+    scores = [_dot(document["vector"], target_vector)]
+    for representative in document.get("representatives") or []:
+        vector = representative.get("vector")
+        if vector:
+            scores.append(_dot(vector, target_vector))
+    return max(scores) if scores else -1.0
+
 
 
 def _document_vectors(
