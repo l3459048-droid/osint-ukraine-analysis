@@ -5438,3 +5438,247 @@ def test_web_claims_explorer_shows_related_evidence(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_claim_structural_review_saves_nontruth_schema(tmp_path: Path):
+    from osint_local.claim_review import review_claim_candidate
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "review-claim.txt"
+    source.write_text(
+        "According to the Ministry, the programme will start on 01.09.2026 "
+        "and will include 240 credits for students.",
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    def fake_chat(base_url, model, messages, qa_config):
+        captured["base_url"] = base_url
+        captured["model"] = model
+        captured["messages"] = messages
+        return json.dumps(
+            {
+                "structural_status": "clear_claim",
+                "claim_type": "attributed",
+                "canonical_claim": "The programme will start on 01.09.2026 and include 240 credits.",
+                "subject": "the programme",
+                "predicate": "will start and include",
+                "object": "01.09.2026 and 240 credits",
+                "certainty": "planned",
+                "rationale": "The sentence attributes a future programme statement.",
+            }
+        )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+        claim = pipeline.db.list_evidence(kind="claim", limit=10)[0]
+
+        result = review_claim_candidate(
+            pipeline.db,
+            int(claim["id"]),
+            settings.qa,
+            settings.analysis,
+            chat_fn=fake_chat,
+        )
+
+        assert result["structural_status"] == "clear_claim"
+        assert result["claim_type"] == "attributed"
+        assert result["certainty"] == "planned"
+        review = pipeline.db.get_claim_review(int(claim["id"]))
+        assert review is not None
+        assert review["canonical_claim"].startswith("The programme will start")
+        assert review["subject"] == "the programme"
+        assert review["method"] == "qwen-structural-v1"
+
+        system_prompt = captured["messages"][0]["content"]
+        assert "Do not fact-check it" in system_prompt
+        assert "Do not decide whether it is true or false" in system_prompt
+        assert captured["base_url"].startswith("http://127.0.0.1")
+    finally:
+        pipeline.close()
+
+
+def test_claim_structural_review_rejects_invalid_model_json(tmp_path: Path):
+    import pytest
+
+    from osint_local.claim_review import review_claim_candidate
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "bad-review.txt"
+    source.write_text(
+        "The programme will start on 01.09.2026 and will include 240 credits for students.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+        claim = pipeline.db.list_evidence(kind="claim", limit=10)[0]
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            review_claim_candidate(
+                pipeline.db,
+                int(claim["id"]),
+                settings.qa,
+                settings.analysis,
+                chat_fn=lambda *args, **kwargs: "not-json",
+            )
+        assert pipeline.db.get_claim_review(int(claim["id"])) is None
+    finally:
+        pipeline.close()
+
+
+def test_claim_review_batch_is_bounded_and_skips_reviewed(tmp_path: Path):
+    from osint_local.claim_review import review_claim_candidates
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "review-batch.txt"
+    source.write_text(
+        "The programme will start on 01.09.2026 and will include 240 credits for students. "
+        "The faculty should provide practical training for all students. "
+        "According to the Ministry, the programme contains a mandatory internship.",
+        encoding="utf-8",
+    )
+
+    def fake_chat(*args, **kwargs):
+        return json.dumps(
+            {
+                "structural_status": "clear_claim",
+                "claim_type": "assertion",
+                "canonical_claim": "Canonical claim.",
+                "subject": "subject",
+                "predicate": "predicate",
+                "object": "object",
+                "certainty": "asserted",
+                "rationale": "Structurally declarative.",
+            }
+        )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+        total = pipeline.db.unreviewed_claim_count(min_confidence=0.0)
+        assert total >= 2
+
+        first = review_claim_candidates(
+            pipeline.db,
+            settings.qa,
+            settings.analysis,
+            limit=1,
+            chat_fn=fake_chat,
+        )
+        assert first["reviewed"] == 1
+        assert first["remaining"] == total - 1
+
+        second = review_claim_candidates(
+            pipeline.db,
+            settings.qa,
+            settings.analysis,
+            limit=1,
+            chat_fn=fake_chat,
+        )
+        assert second["reviewed"] == 1
+        assert second["reviewed_ids"] != first["reviewed_ids"]
+        assert second["remaining"] == total - 2
+    finally:
+        pipeline.close()
+
+
+def test_web_claim_review_action_and_review_rendering(tmp_path: Path):
+    import re
+    import urllib.parse
+    import urllib.request
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "review-web.txt"
+    source.write_text(
+        "The programme will start on 01.09.2026 and will include 240 credits for students.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+        claim = pipeline.db.list_evidence(kind="claim", limit=10)[0]
+        claim_id = int(claim["id"])
+        pipeline.db.save_claim_review(
+            evidence_id=claim_id,
+            structural_status="clear_claim",
+            claim_type="forecast",
+            canonical_claim="The programme will start and include 240 credits.",
+            subject="the programme",
+            predicate="will start and include",
+            object_text="240 credits",
+            certainty="planned",
+            rationale="Future declarative statement.",
+            model="test-model",
+            method="qwen-structural-v1",
+            reviewed_at="2026-09-28T00:00:00+00:00",
+        )
+
+        calls = []
+        server = create_server(pipeline, "127.0.0.1", 0)
+        server.actions.start_claim_review = lambda **kwargs: (
+            calls.append(kwargs)
+            or {
+                "kind": "claim-review",
+                "status": "running",
+                "message": "Starting…",
+            }
+        )
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(
+            base + f"/claims?claim={claim_id}",
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+        assert "Structural status" in body
+        assert "clear_claim" in body
+        assert "The programme will start and include 240 credits." in body
+        assert "does not fact-check" in body
+        csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPRedirectHandler()
+        )
+        request = urllib.request.Request(
+            base + "/actions/claim-review",
+            data=urllib.parse.urlencode(
+                {"csrf": csrf, "claim_id": str(claim_id)}
+            ).encode(),
+            method="POST",
+        )
+        with opener.open(request, timeout=5) as response:
+            response.read()
+
+        assert calls == [{"evidence_id": claim_id, "limit": None}]
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
