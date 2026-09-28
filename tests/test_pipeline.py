@@ -5682,3 +5682,127 @@ def test_web_claim_review_action_and_review_rendering(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+def test_corpus_dashboard_reports_library_health_and_web_page(tmp_path: Path):
+    import urllib.request
+
+    from osint_local.corpus_dashboard import build_corpus_dashboard
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "dashboard.txt"
+    source.write_text(
+        "The programme contains 240 credits and starts on 01.09.2026. " * 8,
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        processed = pipeline.process_file(source)
+        assert processed.status == "processed"
+
+        with pipeline.db._lock:
+            pipeline.db.conn.execute(
+                """UPDATE documents
+                   SET extension='.pdf', extraction_method='pdf+ocr', language='en',
+                       metadata_json=?
+                   WHERE sha256=?""",
+                (
+                    json.dumps(
+                        {
+                            "pages": [
+                                {
+                                    "page": 1,
+                                    "method": "ocr",
+                                    "quality_score": 0.61,
+                                    "ocr_checked": True,
+                                    "layout_used": False,
+                                },
+                                {
+                                    "page": 2,
+                                    "method": "pdf-layout",
+                                    "quality_score": 0.95,
+                                    "ocr_checked": False,
+                                    "layout_used": True,
+                                },
+                            ]
+                        }
+                    ),
+                    processed.sha256,
+                ),
+            )
+            pipeline.db.conn.commit()
+
+        build_embeddings(
+            pipeline.db,
+            settings.search,
+            encoder=FakeEncoder(),
+        )
+
+        settings.translations_dir.mkdir(parents=True, exist_ok=True)
+        output = settings.translations_dir / "dashboard.ru.md"
+        output.write_text("Перевод.", encoding="utf-8")
+        output.with_suffix(output.suffix + ".json").write_text(
+            json.dumps(
+                {
+                    "quality_warnings": 2,
+                    "quality_retries": 3,
+                    "quality_fallbacks": 1,
+                    "literal_segment_fallbacks": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        pipeline.db.save_translation(
+            sha256=processed.sha256,
+            source_lang="en",
+            target_lang="ru",
+            output_path=str(output),
+            created_at="2026-09-28T00:00:00+00:00",
+            engine="hybrid-ct2-quality",
+        )
+
+        snapshot = build_corpus_dashboard(settings, pipeline.db)
+        assert snapshot["documents"] == 1
+        assert snapshot["pages"] == 2
+        assert snapshot["ocr_checked_pages"] == 1
+        assert snapshot["ocr_pages"] == 1
+        assert snapshot["layout_pages"] == 1
+        assert snapshot["low_quality_pages"] == 1
+        assert snapshot["semantic_coverage"] == 1.0
+        assert snapshot["translation_eligible_documents"] == 1
+        assert snapshot["translated_eligible_documents"] == 1
+        assert snapshot["translation_coverage"] == 1.0
+        assert snapshot["translation_quality_warnings"] == 2
+        assert snapshot["translation_quality_retries"] == 3
+        assert snapshot["translation_quality_fallbacks"] == 1
+        assert snapshot["literal_segment_fallbacks"] == 1
+        assert snapshot["attention"]
+        assert snapshot["attention"][0]["sha256"] == processed.sha256
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/corpus-dashboard",
+            timeout=5,
+        ) as response:
+            body = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "Corpus Dashboard" in body
+        assert "Translation coverage &amp; quality" in body
+        assert "Low extraction quality" in body
+        assert "hybrid-ct2-quality" in body
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
+
