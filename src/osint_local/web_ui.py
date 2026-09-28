@@ -839,13 +839,19 @@ def _analysis_panel(
 
 def _claims_panel(
     *,
+    csrf_token: str,
     claims,
     categories,
     topics,
     selected_claim,
+    selected_review,
+    review_counts: dict,
     related_entities,
     related_dates,
     related_metrics,
+    action: dict,
+    review_enabled: bool,
+    review_batch_size: int,
     selected_subtype: str = "",
     selected_category: str = "",
     selected_topic: str = "",
@@ -920,29 +926,64 @@ def _claims_panel(
             )
         return "".join(parts)
 
+    review_running = (
+        action.get("status") == "running"
+        and action.get("kind") == "claim-review"
+    )
+    review_disabled = " disabled" if review_running or not review_enabled else ""
+    review_status = (
+        action.get("message") if review_running
+        else f'{int(review_counts.get("total", 0))} structurally reviewed'
+    )
+
     detail = ""
     if selected_claim:
         page = selected_claim["page"]
         location = str(selected_claim["source_path"])
         if page is not None:
             location += f" · page {int(page)}"
+
+        review_html = '<div class="empty compact">Not structurally reviewed yet.</div>'
+        if selected_review:
+            triple = " · ".join(
+                value for value in (
+                    str(selected_review["subject"] or "").strip(),
+                    str(selected_review["predicate"] or "").strip(),
+                    str(selected_review["object_text"] or "").strip(),
+                )
+                if value
+            )
+            review_html = f"""<div class="meta-grid">
+<div><span>Structural status</span><strong>{_e(selected_review["structural_status"])}</strong></div>
+<div><span>Claim type</span><strong>{_e(selected_review["claim_type"])}</strong></div>
+<div><span>Certainty</span><strong>{_e(selected_review["certainty"])}</strong></div>
+</div>
+<p><strong>Canonical:</strong> {_e(selected_review["canonical_claim"] or "—")}</p>
+<p><strong>Structure:</strong> {_e(triple or "—")}</p>
+<p><strong>Review note:</strong> {_e(selected_review["rationale"] or "—")}</p>
+<div class="panel-subtle">{_e(selected_review["model"])} · {_e(selected_review["method"])} · {_e(selected_review["reviewed_at"])}</div>"""
+
         detail = f"""<section class="panel">
-<div class="panel-head"><div><h2>Selected claim</h2><span class="panel-subtle">{_e(location)} · confidence {float(selected_claim["confidence"]):.2f}</span></div></div>
+<div class="panel-head"><div><h2>Selected claim</h2><span class="panel-subtle">{_e(location)} · heuristic confidence {float(selected_claim["confidence"]):.2f}</span></div>
+<form action="/actions/claim-review" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><input type="hidden" name="claim_id" value="{int(selected_claim["id"])}"><button type="submit"{review_disabled}>Review structure with Qwen</button></form></div>
 <p>{_e(selected_claim["value"])}</p>
+<div class="ask-filter-note">Structural review does not fact-check this statement and does not label it true/false.</div>
+{review_html}
 <h3>Entities in the same chunk</h3><div class="badges">{relation_chips(related_entities, "entity")}</div>
 <h3>Dates in the same chunk</h3><div class="badges">{relation_chips(related_dates, "date")}</div>
 <h3>Metrics in the same chunk</h3><div class="badges">{relation_chips(related_metrics, "metric")}</div>
 </section>"""
 
     return f"""<section class="panel">
-<div class="panel-head"><div><h2>Claims Explorer</h2><span class="panel-subtle">Candidate assertions with direct evidence provenance</span></div><a href="/analysis">Back to Analysis</a></div>
+<div class="panel-head"><div><h2>Claims Explorer</h2><span class="panel-subtle">Candidate assertions with direct evidence provenance · {_e(review_status)}</span></div>
+<div class="doc-actions"><a class="button secondary" href="/analysis">Back to Analysis</a><form action="/actions/claim-review" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><input type="hidden" name="limit" value="{int(review_batch_size)}"><button type="submit"{review_disabled}>Review next {int(review_batch_size)}</button></form></div></div>
 <form class="search-form" action="/claims" method="get">
 <select name="subtype">{subtype_options}</select>
 <select name="category">{category_options}</select>
 <select name="topic">{topic_options}</select>
 <button type="submit">Filter</button>
 </form>
-<div class="ask-filter-note">These are conservative claim candidates extracted from declarative sentences. A candidate is not automatically treated as true; use the linked source evidence for verification.</div>
+<div class="ask-filter-note">These are conservative claim candidates extracted from declarative sentences. Qwen review is bounded and structural only: clear claim / not a claim / uncertain, canonical form and subject–predicate–object when possible. It never verifies truth; use linked source evidence for factual verification.</div>
 </section>
 {detail}
 <section class="panel"><div class="panel-head"><h2>Claim candidates</h2><span class="panel-subtle">{len(claims)} shown</span></div>{claims_html}</section>"""
