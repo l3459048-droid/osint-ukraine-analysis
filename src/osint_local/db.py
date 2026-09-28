@@ -1546,6 +1546,23 @@ class Database:
         result["total"] = total
         return result
 
+    def unreviewed_claim_count(
+        self,
+        *,
+        min_confidence: float = 0.0,
+    ) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT COUNT(*) AS n
+                   FROM evidence_items e
+                   LEFT JOIN claim_reviews r ON r.evidence_id=e.id
+                   WHERE e.kind='claim'
+                     AND e.confidence>=?
+                     AND r.evidence_id IS NULL""",
+                (float(min_confidence),),
+            ).fetchone()
+        return int(row["n"])
+
     def unreviewed_claims(
         self,
         *,
