@@ -503,6 +503,10 @@ def refresh_adaptive_taxonomy(
             "key": str(row["topic_key"]),
             "category_key": str(row["category_key"] or "") or None,
             "vector": _blob_to_vector(row["centroid"]),
+            "document_count": int(row["document_count"] or 0),
+            "document_ratio": (
+                int(row["document_count"] or 0) / max(1, len(documents))
+            ),
         }
         for row in topic_rows
         if row["centroid"]
@@ -1262,11 +1266,14 @@ def _materialize_categories(
         candidates.append(
             {
                 "key": key,
+                "kind": "category",
                 "name": _fallback_name(keywords, "Discovered Category"),
                 "description": _fallback_description("category", len(documents), keywords),
                 "keywords": keywords,
                 "vector": list(cluster["vector"]),
                 "document_count": len(documents),
+                "document_ratio": 0.0,
+                "cohesion": _cluster_cohesion(cluster),
                 "topic_keys": topic_keys,
                 "representatives": [topic["name"] for topic in member_topics[:6]],
                 "snippets": [topic["description"][:400] for topic in member_topics[:6]],
@@ -1553,6 +1560,9 @@ def _generated_label_is_usable(
         if token not in STOPWORDS and token not in LABEL_NOISE
     ]
     if not content_tokens:
+        return False
+
+    if any(token in {"topic", "topics"} for token in tokens):
         return False
 
     if str(item.get("kind") or "") == "topic":
