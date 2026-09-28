@@ -196,6 +196,28 @@ CREATE INDEX IF NOT EXISTS idx_evidence_items_kind
 CREATE INDEX IF NOT EXISTS idx_evidence_items_chunk
     ON evidence_items(chunk_id, start_offset);
 
+CREATE TABLE IF NOT EXISTS claim_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_sha256 TEXT NOT NULL,
+    chunk_id INTEGER NOT NULL,
+    page INTEGER,
+    claim_type TEXT NOT NULL DEFAULT 'assertion',
+    claim_text TEXT NOT NULL,
+    normalized_hash TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    run_id INTEGER NOT NULL,
+    FOREIGN KEY(document_sha256) REFERENCES documents(sha256) ON DELETE CASCADE,
+    FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE,
+    FOREIGN KEY(run_id) REFERENCES corpus_analysis_runs(id) ON DELETE CASCADE,
+    UNIQUE(document_sha256, chunk_id, normalized_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_claim_items_document
+    ON claim_items(document_sha256, page, chunk_id);
+CREATE INDEX IF NOT EXISTS idx_claim_items_type
+    ON claim_items(claim_type, confidence DESC);
+
 """
 
 
@@ -1272,10 +1294,12 @@ class Database:
         finished_at: str,
         evidence: list[dict[str, Any]],
         details_json: str,
+        claims: list[dict[str, Any]] | None = None,
     ) -> None:
         with self._lock:
             self.conn.execute("BEGIN IMMEDIATE")
             try:
+                self.conn.execute("DELETE FROM claim_items")
                 self.conn.execute("DELETE FROM evidence_items")
                 self.conn.executemany(
                     """INSERT INTO evidence_items
@@ -1300,6 +1324,28 @@ class Database:
                             int(run_id),
                         )
                         for item in evidence
+                    ],
+                )
+                self.conn.executemany(
+                    """INSERT INTO claim_items
+                       (document_sha256, chunk_id, page, claim_type, claim_text,
+                        normalized_hash, confidence, evidence_json, metadata_json,
+                        run_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            item["document_sha256"],
+                            int(item["chunk_id"]),
+                            item.get("page"),
+                            item.get("claim_type", "assertion"),
+                            item["claim_text"],
+                            item["normalized_hash"],
+                            float(item.get("confidence") or 0.0),
+                            item.get("evidence_json", "[]"),
+                            item.get("metadata_json", "{}"),
+                            int(run_id),
+                        )
+                        for item in (claims or [])
                     ],
                 )
                 self.conn.execute(
@@ -1505,6 +1551,103 @@ class Database:
                     ORDER BY d.source_path, COALESCE(e.page, 0),
                              e.chunk_id, e.start_offset
                     LIMIT ?""",
+                params,
+            ).fetchall()
+
+    def claim_counts(self) -> dict[str, Any]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT claim_type, COUNT(*) AS n
+                   FROM claim_items
+                   GROUP BY claim_type
+                   ORDER BY n DESC, claim_type"""
+            ).fetchall()
+            total = int(
+                self.conn.execute("SELECT COUNT(*) FROM claim_items").fetchone()[0]
+            )
+            documents = int(
+                self.conn.execute(
+                    "SELECT COUNT(DISTINCT document_sha256) FROM claim_items"
+                ).fetchone()[0]
+            )
+        return {
+            "total": total,
+            "documents": documents,
+            "types": {
+                str(row["claim_type"]): int(row["n"])
+                for row in rows
+            },
+        }
+
+    def claims_for_document(
+        self,
+        sha256: str,
+        *,
+        limit: int = 300,
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                """SELECT cl.*, c.chunk_index
+                   FROM claim_items cl
+                   JOIN chunks c ON c.id=cl.chunk_id
+                   WHERE cl.document_sha256=?
+                   ORDER BY COALESCE(cl.page, 0), cl.chunk_id, cl.id
+                   LIMIT ?""",
+                (
+                    sha256,
+                    max(1, min(5000, int(limit))),
+                ),
+            ).fetchall()
+
+    def list_claims(
+        self,
+        *,
+        claim_type: str | None = None,
+        category_key: str | None = None,
+        topic_key: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
+        conditions = []
+        params: list[Any] = []
+        if claim_type:
+            conditions.append("cl.claim_type=?")
+            params.append(str(claim_type))
+        if category_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_categories dtc
+                    WHERE dtc.document_sha256=cl.document_sha256
+                      AND dtc.category_key=?
+                )"""
+            )
+            params.append(str(category_key))
+        if topic_key:
+            conditions.append(
+                """EXISTS (
+                    SELECT 1 FROM document_taxonomy_topics dtt
+                    WHERE dtt.document_sha256=cl.document_sha256
+                      AND dtt.topic_key=?
+                )"""
+            )
+            params.append(str(topic_key))
+        clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.extend(
+            [
+                max(1, min(5000, int(limit))),
+                max(0, int(offset)),
+            ]
+        )
+        with self._lock:
+            return self.conn.execute(
+                f"""SELECT cl.*, d.source_path, c.chunk_index
+                    FROM claim_items cl
+                    JOIN documents d ON d.sha256=cl.document_sha256
+                    JOIN chunks c ON c.id=cl.chunk_id
+                    {clause}
+                    ORDER BY cl.confidence DESC, d.source_path,
+                             COALESCE(cl.page, 0), cl.chunk_id
+                    LIMIT ? OFFSET ?""",
                 params,
             ).fetchall()
 
