@@ -339,6 +339,10 @@ def _translation_panel(
                 pdf_link = (
                     f'<a class="translation-export" href="/translation-export/{_e(sha256)}/{_e(row["source_lang"])}/ru/pdf-layout" download>PDF · layout</a>'
                 )
+            elif str(row["engine"] or "").startswith("m2m100"):
+                pdf_link = (
+                    '<span class="panel-subtle">PDF · layout unavailable: run Process now, then re-run Quality</span>'
+                )
             elif quality_ready:
                 pdf_link = (
                     '<span class="panel-subtle">PDF · layout: run this document with Quality first</span>'
