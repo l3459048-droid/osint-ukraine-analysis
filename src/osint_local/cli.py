@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .config import load_settings, update_config, write_default_config
+from .corpus_analysis import build_corpus_evidence
 from .pipeline import LocalPipeline
 from .qa import ask_documents, ollama_models
 from .search import build_embeddings, search_chunks
@@ -44,6 +45,7 @@ def main() -> int:
     index = sub.add_parser("index", help="Build local semantic embeddings for indexed chunks")
     index.add_argument("--force", action="store_true", help="Rebuild embeddings even if they exist")
     sub.add_parser("taxonomy", help="Rebuild adaptive corpus categories and topics from semantic embeddings")
+    sub.add_parser("analyze", help="Extract dates, entities and metrics with document/page/chunk provenance")
 
     search = sub.add_parser("search", help="Search indexed document chunks")
     search.add_argument("query")
@@ -126,6 +128,17 @@ def main() -> int:
                 }
                 if latest else None
             )
+            payload["evidence"] = pipeline.db.evidence_counts()
+            analysis = pipeline.db.latest_corpus_analysis_run()
+            payload["analysis_latest"] = (
+                {
+                    "id": int(analysis["id"]),
+                    "finished_at": analysis["finished_at"],
+                    "analyzer_version": int(analysis["analyzer_version"]),
+                    "evidence": int(analysis["evidence_count"]),
+                }
+                if analysis else None
+            )
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
 
@@ -149,6 +162,14 @@ def main() -> int:
             except RuntimeError as exc:
                 print(str(exc))
                 return 2
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "analyze":
+            result = build_corpus_evidence(
+                pipeline.db,
+                settings.analysis,
+            )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
 
