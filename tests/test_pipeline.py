@@ -4973,3 +4973,30 @@ def test_web_timeline_page_opens_date_evidence(tmp_path: Path):
         if thread is not None:
             thread.join(timeout=5)
         pipeline.close()
+
+
+
+def test_reprocessing_changed_source_path_retires_old_document_version(tmp_path: Path):
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "mutable.txt"
+    source.write_text("First version dated 01.09.2026.", encoding="utf-8")
+
+    pipeline = LocalPipeline(settings)
+    try:
+        first = pipeline.process_file(source)
+        assert first.status == "processed"
+        first_sha = first.sha256
+        assert pipeline.db.document_count() == 1
+
+        source.write_text("Second version dated 02.10.2027.", encoding="utf-8")
+        second = pipeline.process_file(source, force=True)
+        assert second.status == "processed"
+        assert second.sha256 != first_sha
+
+        assert pipeline.db.document_count() == 1
+        assert pipeline.db.get_document(first_sha) is None
+        assert pipeline.db.get_document(second.sha256) is not None
+        assert pipeline.db.chunks_for_document(first_sha) == []
+    finally:
+        pipeline.close()
