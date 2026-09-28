@@ -156,6 +156,46 @@ CREATE TABLE IF NOT EXISTS taxonomy_label_overrides (
 CREATE INDEX IF NOT EXISTS idx_taxonomy_label_overrides_kind
     ON taxonomy_label_overrides(kind, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS corpus_analysis_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    analyzer_version INTEGER NOT NULL,
+    document_count INTEGER NOT NULL DEFAULT 0,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    details_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_corpus_analysis_runs_status
+    ON corpus_analysis_runs(status, id);
+
+CREATE TABLE IF NOT EXISTS evidence_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_sha256 TEXT NOT NULL,
+    chunk_id INTEGER NOT NULL,
+    page INTEGER,
+    kind TEXT NOT NULL,
+    subtype TEXT NOT NULL DEFAULT '',
+    value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    context TEXT NOT NULL DEFAULT '',
+    start_offset INTEGER NOT NULL DEFAULT 0,
+    end_offset INTEGER NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    run_id INTEGER NOT NULL,
+    FOREIGN KEY(document_sha256) REFERENCES documents(sha256) ON DELETE CASCADE,
+    FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE,
+    FOREIGN KEY(run_id) REFERENCES corpus_analysis_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_items_document
+    ON evidence_items(document_sha256, kind, page);
+CREATE INDEX IF NOT EXISTS idx_evidence_items_kind
+    ON evidence_items(kind, subtype, normalized_value);
+CREATE INDEX IF NOT EXISTS idx_evidence_items_chunk
+    ON evidence_items(chunk_id, start_offset);
+
 """
 
 
@@ -1107,6 +1147,252 @@ class Database:
                     (category_key, limit),
                 ).fetchall()
             return []
+
+    def chunk_signature(self) -> str:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT COUNT(*) AS n,
+                          COALESCE(SUM(c.id), 0) AS id_sum,
+                          COALESCE(MAX(c.id), 0) AS id_max,
+                          COALESCE(SUM(LENGTH(c.text)), 0) AS text_chars
+                   FROM chunks c
+                   JOIN documents d ON d.sha256=c.document_sha256
+                   WHERE d.status='done'"""
+            ).fetchone()
+        return (
+            f"{int(row['n'])}:{int(row['id_sum'])}:"
+            f"{int(row['id_max'])}:{int(row['text_chars'])}"
+        )
+
+    def chunk_batches(self, *, batch_size: int = 500):
+        batch_size = max(1, min(5000, int(batch_size)))
+        last_id = 0
+        while True:
+            with self._lock:
+                rows = self.conn.execute(
+                    """SELECT c.id, c.document_sha256, c.page, c.chunk_index,
+                              c.text, d.source_path, d.language
+                       FROM chunks c
+                       JOIN documents d ON d.sha256=c.document_sha256
+                       WHERE d.status='done' AND c.id>?
+                       ORDER BY c.id
+                       LIMIT ?""",
+                    (last_id, batch_size),
+                ).fetchall()
+            if not rows:
+                break
+            yield rows
+            last_id = int(rows[-1]["id"])
+
+    def begin_corpus_analysis_run(
+        self,
+        *,
+        started_at: str,
+        analyzer_version: int,
+        document_count: int,
+        chunk_count: int,
+    ) -> int:
+        with self._lock:
+            cursor = self.conn.execute(
+                """INSERT INTO corpus_analysis_runs
+                   (started_at, status, analyzer_version, document_count, chunk_count)
+                   VALUES (?, 'running', ?, ?, ?)""",
+                (
+                    started_at,
+                    int(analyzer_version),
+                    int(document_count),
+                    int(chunk_count),
+                ),
+            )
+            self.conn.commit()
+            return int(cursor.lastrowid)
+
+    def fail_corpus_analysis_run(
+        self,
+        run_id: int,
+        *,
+        finished_at: str,
+        error: str,
+    ) -> None:
+        import json
+
+        with self._lock:
+            self.conn.execute(
+                """UPDATE corpus_analysis_runs
+                   SET status='failed', finished_at=?, details_json=?
+                   WHERE id=?""",
+                (
+                    finished_at,
+                    json.dumps({"error": str(error)}, ensure_ascii=False),
+                    int(run_id),
+                ),
+            )
+            self.conn.commit()
+
+    def replace_corpus_evidence(
+        self,
+        *,
+        run_id: int,
+        finished_at: str,
+        evidence: list[dict[str, Any]],
+        details_json: str,
+    ) -> None:
+        with self._lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute("DELETE FROM evidence_items")
+                self.conn.executemany(
+                    """INSERT INTO evidence_items
+                       (document_sha256, chunk_id, page, kind, subtype, value,
+                        normalized_value, context, start_offset, end_offset,
+                        confidence, metadata_json, run_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            item["document_sha256"],
+                            int(item["chunk_id"]),
+                            item.get("page"),
+                            item["kind"],
+                            item.get("subtype", ""),
+                            item["value"],
+                            item["normalized_value"],
+                            item.get("context", ""),
+                            int(item.get("start_offset") or 0),
+                            int(item.get("end_offset") or 0),
+                            float(item.get("confidence") or 0.0),
+                            item.get("metadata_json", "{}"),
+                            int(run_id),
+                        )
+                        for item in evidence
+                    ],
+                )
+                self.conn.execute(
+                    """UPDATE corpus_analysis_runs
+                       SET status='done', finished_at=?, evidence_count=?,
+                           details_json=?
+                       WHERE id=?""",
+                    (
+                        finished_at,
+                        len(evidence),
+                        details_json,
+                        int(run_id),
+                    ),
+                )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def latest_corpus_analysis_run(self):
+        with self._lock:
+            return self.conn.execute(
+                """SELECT * FROM corpus_analysis_runs
+                   WHERE status='done'
+                   ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+
+    def evidence_counts(self) -> dict[str, int]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT kind, COUNT(*) AS n
+                   FROM evidence_items
+                   GROUP BY kind"""
+            ).fetchall()
+            documents = int(
+                self.conn.execute(
+                    "SELECT COUNT(DISTINCT document_sha256) FROM evidence_items"
+                ).fetchone()[0]
+            )
+        counts = {str(row["kind"]): int(row["n"]) for row in rows}
+        counts["documents"] = documents
+        counts["total"] = sum(
+            value for key, value in counts.items()
+            if key not in {"documents", "total"}
+        )
+        return counts
+
+    def evidence_for_document(
+        self,
+        sha256: str,
+        *,
+        kind: str | None = None,
+        limit: int = 500,
+    ) -> list[sqlite3.Row]:
+        limit = max(1, min(5000, int(limit)))
+        params: list[Any] = [sha256]
+        condition = ""
+        if kind:
+            condition = " AND kind=?"
+            params.append(str(kind))
+        params.append(limit)
+        with self._lock:
+            return self.conn.execute(
+                f"""SELECT * FROM evidence_items
+                    WHERE document_sha256=?{condition}
+                    ORDER BY COALESCE(page, 0), chunk_id, start_offset
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+
+    def list_evidence(
+        self,
+        *,
+        kind: str | None = None,
+        subtype: str | None = None,
+        normalized_value: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
+        conditions = []
+        params: list[Any] = []
+        if kind:
+            conditions.append("e.kind=?")
+            params.append(str(kind))
+        if subtype:
+            conditions.append("e.subtype=?")
+            params.append(str(subtype))
+        if normalized_value:
+            conditions.append("e.normalized_value=?")
+            params.append(str(normalized_value))
+        clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.extend([
+            max(1, min(5000, int(limit))),
+            max(0, int(offset)),
+        ])
+        with self._lock:
+            return self.conn.execute(
+                f"""SELECT e.*, d.source_path
+                    FROM evidence_items e
+                    JOIN documents d ON d.sha256=e.document_sha256
+                    {clause}
+                    ORDER BY e.kind, e.normalized_value,
+                             d.source_path, COALESCE(e.page, 0), e.chunk_id
+                    LIMIT ? OFFSET ?""",
+                params,
+            ).fetchall()
+
+    def top_evidence_values(
+        self,
+        *,
+        kind: str,
+        limit: int = 100,
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                """SELECT kind, subtype, normalized_value,
+                          MIN(value) AS sample_value,
+                          COUNT(*) AS mentions,
+                          COUNT(DISTINCT document_sha256) AS documents
+                   FROM evidence_items
+                   WHERE kind=?
+                   GROUP BY kind, subtype, normalized_value
+                   ORDER BY documents DESC, mentions DESC, normalized_value
+                   LIMIT ?""",
+                (
+                    str(kind),
+                    max(1, min(1000, int(limit))),
+                ),
+            ).fetchall()
 
     def recent_errors(self, *, limit: int = 10) -> list[dict[str, Any]]:
         with self._lock:
