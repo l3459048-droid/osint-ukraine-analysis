@@ -155,6 +155,10 @@ class LocalPipeline:
                 classifications=classes,
                 chunks=chunks,
             )
+            self.db.prune_superseded_source_versions(
+                source_path=source_path,
+                current_sha256=sha256,
+            )
 
             if bool(self.settings.search.get("auto_embed", False)):
                 from .search import build_embeddings
