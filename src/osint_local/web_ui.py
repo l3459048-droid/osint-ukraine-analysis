@@ -14,8 +14,8 @@ def _layout(title: str, body: str) -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.21</span></a><nav>
-<a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/entities">Entities</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
+<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.22</span></a><nav>
+<a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/corpus-dashboard">Dashboard</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/entities">Entities</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
 <footer>Local-first · source files stay on this computer</footer>
@@ -584,6 +584,67 @@ def _taxonomy_badges(taxonomy: dict) -> str:
         )
     parts.append("</div>")
     return "".join(parts)
+
+
+def _corpus_dashboard_panel(snapshot: dict) -> str:
+    semantic_pct = float(snapshot.get("semantic_coverage") or 0.0) * 100.0
+    translation_pct = float(snapshot.get("translation_coverage") or 0.0) * 100.0
+
+    def badges(rows, empty_text: str) -> str:
+        values = "".join(
+            f'<span class="badge">{_e(row.get("name", "Unknown"))} <b>{int(row.get("count", 0))}</b></span>'
+            for row in (rows or [])[:18]
+        )
+        return values or f'<span class="translation-empty">{_e(empty_text)}</span>'
+
+    attention = snapshot.get("attention") or []
+    if attention:
+        attention_html = "".join(
+            f'<article class="result"><div class="result-meta"><span>{_e(row.get("source_path", ""))}</span></div>'
+            f'<h3><a href="/documents/{_e(row.get("sha256", ""))}">{_e(row.get("source_path", "Document"))}</a></h3>'
+            f'<p>{_e(" · ".join(row.get("reasons") or []))}</p></article>'
+            for row in attention
+        )
+    else:
+        attention_html = '<div class="empty">No processing errors, low-quality extraction pages, or translation quality warnings detected.</div>'
+
+    return f"""<section class="stats-grid">
+{_stat_card("Documents", snapshot.get("documents", 0))}
+{_stat_card("PDF pages", snapshot.get("pages", 0))}
+{_stat_card("Chunks", snapshot.get("chunks", 0))}
+{_stat_card("Semantic coverage", f"{semantic_pct:.1f}%")}
+{_stat_card("RU translation coverage", f"{translation_pct:.1f}%")}
+{_stat_card("Errors", snapshot.get("errors", 0))}
+</section>
+<section class="panel">
+<div class="panel-head"><div><h2>Library composition</h2><span class="panel-subtle">Persisted metadata only · no OCR or translation is re-run</span></div></div>
+<div class="two-col"><div><h3>Languages</h3><div class="badges">{badges(snapshot.get("languages"), "No language data yet.")}</div></div>
+<div><h3>File types</h3><div class="badges">{badges(snapshot.get("file_types"), "No files indexed yet.")}</div></div></div>
+</section>
+<section class="panel">
+<div class="panel-head"><div><h2>Extraction & OCR health</h2><span class="panel-subtle">{int(snapshot.get("low_quality_documents", 0))} document(s) below extraction threshold</span></div></div>
+<div class="system-grid">
+<div><span>Extraction methods</span><strong>{len(snapshot.get("extraction_methods") or [])} method(s)</strong><small>{int(snapshot.get("low_quality_pages", 0))} low-quality page(s)</small></div>
+<div><span>OCR probing</span><strong>{int(snapshot.get("ocr_checked_pages", 0))} page(s) checked</strong><small>{int(snapshot.get("ocr_pages", 0))} page(s) selected OCR · {int(snapshot.get("ocr_documents", 0))} document(s)</small></div>
+<div><span>Layout-aware extraction</span><strong>{int(snapshot.get("layout_pages", 0))} page(s)</strong><small>Pages where layout text was selected over native linear text</small></div>
+<div><span>Semantic index</span><strong>{int(snapshot.get("embedding_count", 0))}/{int(snapshot.get("chunks", 0))} chunks</strong><small>{semantic_pct:.1f}% coverage</small></div>
+</div>
+<div class="badges">{badges(snapshot.get("extraction_methods"), "No extraction data yet.")}</div>
+</section>
+<section class="panel">
+<div class="panel-head"><div><h2>Translation coverage & quality</h2><span class="panel-subtle">EN/UK → RU eligible documents</span></div></div>
+<div class="system-grid">
+<div><span>Coverage</span><strong>{int(snapshot.get("translated_eligible_documents", 0))}/{int(snapshot.get("translation_eligible_documents", 0))}</strong><small>{translation_pct:.1f}% of eligible documents translated</small></div>
+<div><span>Quality warnings</span><strong>{int(snapshot.get("translation_quality_warnings", 0))}</strong><small>{int(snapshot.get("translation_warning_documents", 0))} document(s)</small></div>
+<div><span>Quality retries / fallbacks</span><strong>{int(snapshot.get("translation_quality_retries", 0))} / {int(snapshot.get("translation_quality_fallbacks", 0))}</strong><small>Fast translation quality gate activity</small></div>
+<div><span>Protected literal fallbacks</span><strong>{int(snapshot.get("literal_segment_fallbacks", 0))}</strong><small>Segment-around-literal recovery events</small></div>
+</div>
+<div class="badges">{badges(snapshot.get("translation_engines"), "No Russian translations saved yet.")}</div>
+</section>
+<section class="panel">
+<div class="panel-head"><div><h2>Needs attention</h2><span class="panel-subtle">{len(attention)} document(s) shown</span></div></div>
+<div class="results">{attention_html}</div>
+</section>"""
 
 
 def _taxonomy_panel(
