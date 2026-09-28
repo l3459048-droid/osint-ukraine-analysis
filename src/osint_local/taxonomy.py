@@ -237,13 +237,13 @@ def build_adaptive_taxonomy(
             similarity_threshold=category_threshold,
             merge_threshold=category_merge,
             max_clusters=0,
-            weighted=True,
+            weighted=False,
         )
         raw_categories = _soft_cap_clusters(
             raw_categories,
             max_clusters=max_categories,
             merge_threshold=category_merge,
-            weighted=True,
+            weighted=False,
         )
         previous_categories = (
             db.list_taxonomy_categories(limit=1000)
