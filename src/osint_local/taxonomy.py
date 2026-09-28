@@ -469,6 +469,16 @@ def refresh_adaptive_taxonomy(
             "needs_rebuild": True,
             "reason": "embedding_model_changed",
         }
+    try:
+        latest_details = json.loads(str(latest["details_json"] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        latest_details = {}
+    if int(latest_details.get("taxonomy_quality_version") or 0) != TAXONOMY_QUALITY_VERSION:
+        return {
+            "mode": "incremental",
+            "needs_rebuild": True,
+            "reason": "taxonomy_quality_upgrade",
+        }
 
     topic_rows = db.list_taxonomy_topics(limit=5000)
     category_rows = db.list_taxonomy_categories(limit=1000)
@@ -484,6 +494,7 @@ def refresh_adaptive_taxonomy(
     documents = _document_vectors(
         db,
         model,
+        taxonomy_config=taxonomy_config,
         should_pause=should_pause,
         progress=progress,
     )
