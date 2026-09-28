@@ -5806,3 +5806,223 @@ def test_corpus_dashboard_reports_library_health_and_web_page(tmp_path: Path):
             thread.join(timeout=5)
         pipeline.close()
 
+def test_taxonomy_quality_v2_keeps_unrelated_clusters_separate_at_soft_cap():
+    import osint_local.taxonomy as taxonomy
+
+    items = [
+        {"id": "a", "vector": [1.0, 0.0, 0.0]},
+        {"id": "b", "vector": [0.0, 1.0, 0.0]},
+        {"id": "c", "vector": [0.0, 0.0, 1.0]},
+    ]
+    clusters = taxonomy._cluster_items(
+        items,
+        similarity_threshold=0.80,
+        merge_threshold=0.95,
+        max_clusters=2,
+    )
+    assert len(clusters) == 3
+
+
+def test_taxonomy_quality_v2_splits_oversized_mixed_topic_cluster():
+    import osint_local.taxonomy as taxonomy
+
+    items = []
+    for index in range(5):
+        items.append(
+            {
+                "id": f"drone-{index}",
+                "document_id": f"drone-{index}",
+                "vector": [1.0, 0.0],
+            }
+        )
+    diagonal = 2 ** -0.5
+    for index in range(5):
+        items.append(
+            {
+                "id": f"radio-{index}",
+                "document_id": f"radio-{index}",
+                "vector": [diagonal, diagonal],
+            }
+        )
+
+    raw = taxonomy._cluster_items(
+        items,
+        similarity_threshold=0.70,
+        merge_threshold=0.90,
+        max_clusters=0,
+    )
+    assert len(raw) == 1
+
+    refined = taxonomy._refine_topic_clusters(
+        raw,
+        total_documents=10,
+        similarity_threshold=0.70,
+        merge_threshold=0.90,
+        taxonomy_config={
+            "topic_min_cohesion": 0.72,
+            "topic_max_document_ratio": 0.45,
+            "topic_recluster_similarity_boost": 0.08,
+        },
+    )
+    assert len(refined) == 2
+    assert sorted(taxonomy._cluster_document_count(row) for row in refined) == [5, 5]
+
+
+def test_taxonomy_quality_v2_preserves_multiple_document_facets(tmp_path: Path):
+    from osint_local.search import _normalize_vector, _vector_to_blob
+    from osint_local.taxonomy import _document_vectors
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "facets.txt"
+    source.write_text(
+        ("FPV drone operations " * 90)
+        + "\n\n"
+        + ("radio spectrum VTX communications " * 90),
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    try:
+        result = pipeline.process_file(source)
+        chunks = pipeline.db.chunks_for_document(result.sha256, limit=10)
+        assert len(chunks) >= 2
+        vectors = [
+            _normalize_vector([1.0, 0.0]),
+            _normalize_vector([0.0, 1.0]),
+        ]
+        pipeline.db.save_embeddings(
+            [
+                (
+                    chunks[index]["id"],
+                    settings.search["model"],
+                    2,
+                    _vector_to_blob(vectors[index]),
+                )
+                for index in range(2)
+            ]
+        )
+
+        documents = _document_vectors(
+            pipeline.db,
+            settings.search["model"],
+            taxonomy_config={
+                "document_representatives": 4,
+                "document_representative_pool": 16,
+                "document_representative_novelty": 0.90,
+            },
+        )
+        assert len(documents) == 1
+        assert len(documents[0]["representatives"]) == 2
+        representative_vectors = {
+            tuple(round(value, 4) for value in row["vector"])
+            for row in documents[0]["representatives"]
+        }
+        assert representative_vectors == {(1.0, 0.0), (0.0, 1.0)}
+    finally:
+        pipeline.close()
+
+
+def test_taxonomy_quality_v2_penalizes_overbroad_topic_assignment():
+    import osint_local.taxonomy as taxonomy
+
+    document = {
+        "id": "doc",
+        "vector": [1.0, 0.0],
+        "representatives": [{"vector": [0.75, (1 - 0.75 ** 2) ** 0.5]}],
+    }
+    broad = {
+        "key": "broad",
+        "vector": [1.0, 0.0],
+        "document_count": 90,
+        "document_ratio": 0.90,
+        "category_key": None,
+    }
+    narrow_vector = [0.74, (1 - 0.74 ** 2) ** 0.5]
+    narrow = {
+        "key": "narrow",
+        "vector": narrow_vector,
+        "document_count": 10,
+        "document_ratio": 0.10,
+        "category_key": None,
+    }
+    result = taxonomy._assign_documents_to_taxonomy(
+        [document],
+        [broad, narrow],
+        [],
+        {
+            "topic_assignment_similarity": 0.70,
+            "quality_assignment_floor": 0.70,
+            "topic_secondary_margin": 0.18,
+            "broad_topic_ratio_start": 0.25,
+            "broad_topic_assignment_penalty": 0.10,
+            "max_topics_per_document": 4,
+        },
+    )
+    assigned = [row[1] for row in result["topic_assignments"]]
+    assert "narrow" in assigned
+
+
+def test_taxonomy_quality_v2_filters_generic_fallback_and_llm_labels():
+    import osint_local.taxonomy as taxonomy
+
+    name = taxonomy._fallback_name(
+        ["год", "грн", "навантаження", "fpv", "дрони"],
+        "Discovered Topic",
+    )
+    assert "год" not in name.casefold()
+    assert "грн" not in name.casefold()
+    assert "fpv" in name.casefold()
+
+    candidate = {
+        "kind": "topic",
+        "keywords": ["fpv", "дрони"],
+    }
+    assert taxonomy._generated_label_is_usable(
+        candidate,
+        "Military and Defense",
+    ) is False
+    assert taxonomy._generated_label_is_usable(
+        candidate,
+        "FPV Drone Operations",
+    ) is True
+
+
+def test_taxonomy_quality_v2_requests_rebuild_for_legacy_taxonomy(tmp_path: Path):
+    from osint_local.taxonomy import refresh_adaptive_taxonomy, taxonomy_is_stale
+
+    settings = load_settings(make_config(tmp_path))
+    pipeline = LocalPipeline(settings)
+    try:
+        run_id = pipeline.db.begin_taxonomy_run(
+            started_at="2026-09-28T00:00:00+00:00",
+            model=settings.search["model"],
+            document_count=0,
+            embedding_count=0,
+        )
+        pipeline.db.replace_taxonomy(
+            run_id=run_id,
+            finished_at="2026-09-28T00:00:01+00:00",
+            categories=[],
+            topics=[],
+            category_assignments=[],
+            topic_assignments=[],
+            details_json=json.dumps(
+                {
+                    "embedding_signature": pipeline.db.embedding_signature(
+                        settings.search["model"]
+                    )
+                }
+            ),
+        )
+        assert taxonomy_is_stale(pipeline.db, settings.search) is True
+        refreshed = refresh_adaptive_taxonomy(
+            pipeline.db,
+            settings.search,
+            settings.taxonomy,
+        )
+        assert refreshed["needs_rebuild"] is True
+        assert refreshed["reason"] == "taxonomy_quality_upgrade"
+    finally:
+        pipeline.close()
+
