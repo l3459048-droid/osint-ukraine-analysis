@@ -215,8 +215,8 @@ def review_claim_candidates(
 def _parse_review_json(raw: str) -> dict[str, str]:
     value = str(raw or "").strip()
     if value.startswith("```"):
-        value = re.sub(r"^\`\`\`(?:json)?\s*", "", value, flags=re.I)
-        value = re.sub(r"\s*\`\`\`$", "", value)
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.I)
+        value = re.sub(r"\s*```$", "", value)
 
     start = value.find("{")
     end = value.rfind("}")
