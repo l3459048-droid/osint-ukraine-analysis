@@ -51,6 +51,7 @@ from .web_ui import (
     _classification_badges,
     _document_cards,
     _document_evidence_panel,
+    _entities_panel,
     _document_table,
     _domain_filter,
     _e,
@@ -688,6 +689,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._taxonomy_page(query)
             elif path == "/analysis":
                 self._analysis_page(query)
+            elif path == "/entities":
+                self._entities_page(query)
             elif path == "/timeline":
                 self._timeline_page(query)
             elif path == "/ask":
@@ -1065,6 +1068,62 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
         ]
         self._html("Analysis", "".join(body))
+
+    def _entities_page(self, query: dict[str, list[str]]) -> None:
+        subtype = _first(query, "subtype").strip().casefold()
+        if subtype not in {"", "person", "organization", "acronym"}:
+            subtype = ""
+        selected = _first(query, "entity").strip()
+
+        entities = self.db.entity_values(
+            subtype=subtype or None,
+            limit=500,
+        )
+        evidence = (
+            self.db.list_evidence(
+                kind="entity",
+                normalized_value=selected,
+                limit=300,
+            )
+            if selected else []
+        )
+        cooccurrences = (
+            self.db.entity_cooccurrences(selected, limit=100)
+            if selected else []
+        )
+        dates = (
+            self.db.entity_related_values(
+                selected,
+                kind="date",
+                limit=100,
+            )
+            if selected else []
+        )
+        metrics = (
+            self.db.entity_related_values(
+                selected,
+                kind="metric",
+                limit=100,
+            )
+            if selected else []
+        )
+
+        body = [
+            _page_header(
+                "Entities",
+                "Explore people, organizations and acronyms with shared-chunk evidence relationships.",
+            ),
+            _entities_panel(
+                entities=entities,
+                evidence=evidence,
+                cooccurrences=cooccurrences,
+                dates=dates,
+                metrics=metrics,
+                selected_subtype=subtype,
+                selected_value=selected,
+            ),
+        ]
+        self._html("Entities", "".join(body))
 
     def _timeline_page(self, query: dict[str, list[str]]) -> None:
         date_from = _first(query, "from").strip()
