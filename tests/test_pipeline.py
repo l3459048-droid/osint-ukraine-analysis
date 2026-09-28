@@ -4806,3 +4806,170 @@ def test_maintenance_auto_rebuilds_stale_corpus_evidence(tmp_path: Path, monkeyp
         assert result["translated"] == []
     finally:
         pipeline.close()
+
+
+
+def test_timeline_filters_dates_by_adaptive_category(tmp_path: Path):
+    from array import array
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    pipeline = LocalPipeline(settings)
+    try:
+        drone_path = settings.input_dir / "drone.txt"
+        drone_path.write_text(
+            "Drone programme approved on 01.09.2026.",
+            encoding="utf-8",
+        )
+        drone = pipeline.process_file(drone_path)
+
+        tourism_path = settings.input_dir / "tourism.txt"
+        tourism_path.write_text(
+            "Tourism programme approved on 10.07.2018.",
+            encoding="utf-8",
+        )
+        tourism = pipeline.process_file(tourism_path)
+
+        build_corpus_evidence(pipeline.db, settings.analysis)
+
+        vector = array("f", [1.0, 0.0]).tobytes()
+        now = "2026-09-28T00:00:00+00:00"
+        run_id = pipeline.db.begin_taxonomy_run(
+            started_at=now,
+            model=settings.search["model"],
+            document_count=2,
+            embedding_count=0,
+        )
+        pipeline.db.replace_taxonomy(
+            run_id=run_id,
+            finished_at=now,
+            categories=[
+                {
+                    "key": "category-drone",
+                    "name": "Drones",
+                    "description": "Drone documents",
+                    "keywords_json": '["drone"]',
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 1,
+                    "topic_count": 1,
+                    "source": "discovered",
+                },
+                {
+                    "key": "category-tourism",
+                    "name": "Tourism",
+                    "description": "Tourism documents",
+                    "keywords_json": '["tourism"]',
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 1,
+                    "topic_count": 1,
+                    "source": "discovered",
+                },
+            ],
+            topics=[
+                {
+                    "key": "topic-drone",
+                    "category_key": "category-drone",
+                    "name": "FPV",
+                    "description": "",
+                    "keywords_json": "[]",
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 1,
+                    "source": "discovered",
+                },
+                {
+                    "key": "topic-tourism",
+                    "category_key": "category-tourism",
+                    "name": "Curriculum",
+                    "description": "",
+                    "keywords_json": "[]",
+                    "centroid": vector,
+                    "dimension": 2,
+                    "document_count": 1,
+                    "source": "discovered",
+                },
+            ],
+            category_assignments=[
+                (drone.sha256, "category-drone", 0.95),
+                (tourism.sha256, "category-tourism", 0.95),
+            ],
+            topic_assignments=[
+                (drone.sha256, "topic-drone", 0.95),
+                (tourism.sha256, "topic-tourism", 0.95),
+            ],
+            details_json="{}",
+        )
+
+        all_dates = pipeline.db.timeline_dates()
+        assert [row["date_value"] for row in all_dates] == [
+            "2018-07-10",
+            "2026-09-01",
+        ]
+
+        drone_dates = pipeline.db.timeline_dates(
+            category_key="category-drone",
+        )
+        assert [row["date_value"] for row in drone_dates] == ["2026-09-01"]
+
+        evidence = pipeline.db.timeline_evidence(
+            date_value="2026-09-01",
+            category_key="category-drone",
+        )
+        assert len(evidence) == 1
+        assert evidence[0]["document_sha256"] == drone.sha256
+        assert evidence[0]["source_path"] == "drone.txt"
+    finally:
+        pipeline.close()
+
+
+def test_web_timeline_page_opens_date_evidence(tmp_path: Path):
+    import urllib.request
+
+    from osint_local.corpus_analysis import build_corpus_evidence
+    from osint_local.web import create_server
+
+    settings = load_settings(make_config(tmp_path))
+    settings.input_dir.mkdir(parents=True)
+    source = settings.input_dir / "timeline.txt"
+    source.write_text(
+        "Milestone on 01.09.2026 and earlier event on 10.07.2018.",
+        encoding="utf-8",
+    )
+
+    pipeline = LocalPipeline(settings)
+    server = None
+    thread = None
+    try:
+        processed = pipeline.process_file(source)
+        build_corpus_evidence(pipeline.db, settings.analysis)
+
+        server = create_server(pipeline, "127.0.0.1", 0)
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        with urllib.request.urlopen(base + "/timeline", timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert "Corpus Timeline" in body
+        assert body.index("2018-07-10") < body.index("2026-09-01")
+
+        with urllib.request.urlopen(
+            base + "/timeline?date=2026-09-01",
+            timeout=5,
+        ) as response:
+            selected = response.read().decode("utf-8")
+        assert "01.09.2026" in selected
+        assert "timeline.txt" in selected
+        assert f"/documents/{processed.sha256}" in selected
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        pipeline.close()
