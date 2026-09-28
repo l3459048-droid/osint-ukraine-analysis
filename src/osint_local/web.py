@@ -1032,7 +1032,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _analysis_page(self, query: dict[str, list[str]]) -> None:
         kind = _first(query, "kind").strip().casefold()
-        if kind not in {"", "date", "entity", "metric"}:
+        if kind not in {"", "date", "entity", "metric", "claim"}:
             kind = ""
         normalized_value = _first(query, "value").strip()
 
@@ -1107,6 +1107,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             if selected else []
         )
+        claims = (
+            self.db.entity_related_values(
+                selected,
+                kind="claim",
+                limit=100,
+            )
+            if selected else []
+        )
 
         body = [
             _page_header(
@@ -1119,6 +1127,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 cooccurrences=cooccurrences,
                 dates=dates,
                 metrics=metrics,
+                claims=claims,
                 selected_subtype=subtype,
                 selected_value=selected,
             ),
