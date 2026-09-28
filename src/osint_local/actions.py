@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .corpus_analysis import analysis_is_stale, build_corpus_evidence
 from .pipeline import LocalPipeline, ProcessResult
 from .search import build_embeddings
 from .translation import next_passive_translation, translate_document
@@ -72,6 +73,9 @@ class ActionManager:
     def start_taxonomy(self) -> dict[str, Any]:
         return self._start("taxonomy", self._run_taxonomy)
 
+    def start_analysis(self) -> dict[str, Any]:
+        return self._start("analysis", self._run_analysis)
+
     def _start(self, kind: str, target: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
             if self._state.status == "running":
@@ -108,6 +112,7 @@ class ActionManager:
                 "index": "Index complete",
                 "translate": "Translation complete",
                 "taxonomy": "Taxonomy complete",
+                "analysis": "Corpus analysis complete",
             }
             if self._state.kind == "maintenance" and result.get("paused"):
                 self._state.message = "Background paused for interactive work"
@@ -119,6 +124,7 @@ class ActionManager:
                     + int(result.get("embedded_chunks") or 0)
                     + len(result.get("translated") or [])
                     + int((result.get("taxonomy") or {}).get("topics") or 0)
+                    + int((result.get("analysis") or {}).get("evidence") or 0)
                 )
                 self._state.message = "Library updated" if changed else "Library up to date"
             else:
@@ -169,6 +175,17 @@ class ActionManager:
             self.pipeline.settings.search,
             self.pipeline.settings.taxonomy,
             self.pipeline.settings.qa,
+            progress=progress,
+            should_pause=self.interactive_busy,
+        )
+
+    def _run_analysis(self) -> dict[str, Any]:
+        def progress(current: int, total: int, message: str) -> None:
+            self._progress(current, total, message)
+
+        return build_corpus_evidence(
+            self.pipeline.db,
+            self.pipeline.settings.analysis,
             progress=progress,
             should_pause=self.interactive_busy,
         )
@@ -290,6 +307,26 @@ class ActionManager:
                     else:
                         taxonomy_result = refresh_result
 
+        analysis_result: dict[str, Any] | None = None
+        if (
+            bool(settings.analysis.get("enabled", True))
+            and bool(settings.analysis.get("auto_rebuild", True))
+            and self.pipeline.db.chunk_count() > 0
+            and analysis_is_stale(self.pipeline.db)
+        ):
+            if self.interactive_busy():
+                self._progress(0, 0, "Background paused before corpus analysis")
+            else:
+                self._progress(0, 0, "Updating corpus evidence…")
+                analysis_result = build_corpus_evidence(
+                    self.pipeline.db,
+                    settings.analysis,
+                    progress=lambda current, total, message: self._progress(
+                        current, total, message
+                    ),
+                    should_pause=self.interactive_busy,
+                )
+
         translated: list[str] = []
         if bool(settings.translation.get("passive_enabled", True)):
             max_per_cycle = max(1, min(5, int(settings.translation.get("max_per_cycle", 1))))
@@ -312,13 +349,20 @@ class ActionManager:
                     break
                 translated.append(item["source_path"])
 
-        if not results and not embedded and not translated and not taxonomy_result:
+        if (
+            not results
+            and not embedded
+            and not translated
+            and not taxonomy_result
+            and not analysis_result
+        ):
             self._progress(0, 0, "Library is up to date")
         return {
             "files_seen": len(results),
             "counts": counts,
             "embedded_chunks": embedded,
             "taxonomy": taxonomy_result,
+            "analysis": analysis_result,
             "translated": translated,
         }
 
