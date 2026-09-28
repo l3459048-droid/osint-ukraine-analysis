@@ -1,8 +1,8 @@
-# OSINT Ukraine Analysis — local-first v0.9.19
+# OSINT Ukraine Analysis — local-first v0.9.20
 
 Локальная система для обработки, поиска, чтения, перевода и вопросов по коллекции OSINT-документов. Основной сценарий полностью работает с папкой на ПК; Google Drive не нужен.
 
-## Что делает v0.9.19
+## Что делает v0.9.20
 
 ```text
 папка документов
@@ -98,6 +98,32 @@ osint-local translate <SHA256> --from auto
 ```
 
 При первом ручном переводе недостающие Argos-модели могут быть загружены. Для Ukrainian → Russian система может использовать маршрут через English, если прямой пакет отсутствует. После установки моделей перевод выполняется локально.
+
+## Adaptive Corpus Taxonomy lifecycle v0.9.20
+
+Adaptive taxonomy теперь работает как постоянный lifecycle поверх semantic index, а не как одноразовая кластеризация.
+
+- Новые документы сначала получают **incremental assignment** к уже существующим topics/categories.
+- Полный semantic discovery запускается только когда накопился существенный рост корпуса, достаточно novel/unassigned документов, заметное уменьшение корпуса или достигнут периодический лимит refresh.
+- **Unassigned / Novel** документы видны отдельно в Corpus и являются сигналом для создания/перестройки новых тем.
+- Corpus показывает description, representative keywords, semantic match score и связь topic → category.
+- Важные автоматически найденные category/topic можно **Rename / pin label**. Закреплённое имя имеет приоритет над Qwen и deterministic fallback и переносится на семантически близкий кластер после будущего rebuild.
+- При ошибке rebuild старая рабочая taxonomy сохраняется; assignment updates и full discovery записываются транзакционно.
+- Search и Ask умеют фильтровать по adaptive category/topic.
+- Состояние taxonomy и необходимость rebuild видны в System.
+
+Приоритет именования:
+```text
+manual pinned label
+↓
+stable previous label
+↓
+local Qwen
+↓
+deterministic keyword fallback
+```
+
+Полный OCR, PDF extraction и перевод при taxonomy refresh **не запускаются**.
 
 ## Adaptive Corpus Taxonomy v0.9.19
 
