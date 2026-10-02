@@ -33,6 +33,10 @@ SUPPORTED_LANGS = {"en": "English", "ru": "Russian", "uk": "Ukrainian"}
 ALLOWED_PAIRS = {("en", "ru"), ("uk", "ru")}
 
 
+class _PassiveTranslationStopped(Exception):
+    """Cooperative interruption; do not mark a partial document translated."""
+
+
 def argos_available() -> bool:
     return importlib.util.find_spec("argostranslate") is not None
 
@@ -318,6 +322,8 @@ def _translate_layout_quality(
             )
             source_text = source_texts[index]
             translated_text = engine.translate_text(source_text).strip()
+            if not translated_text:
+                raise RuntimeError(f"Quality Translation returned empty text for page {page_number}, block {index + 1}")
             outputs_by_index[index] = translated_text
             completed += 1
             if progress:
@@ -529,6 +535,7 @@ def translate_document(
                     "model": QUALITY_MODEL_ID,
                     "compute_type": quality_engine.compute_type,
                     "literal_segment_fallbacks": quality_engine.literal_segment_fallbacks,
+                    "quality_warnings": getattr(quality_engine, "quality_warnings", 0),
                     "layout_translation": bool(layout_translation_artifact),
                 }
             elif selected_engine == "quality":
@@ -666,7 +673,16 @@ def _translate_sections_quality(
     for index, (page, text) in enumerate(sections, 1):
         _wait_while_paused(should_pause, progress, index - 1, total)
         units = _paragraphs(text)
-        outputs = engine.translate_texts(units) if units else []
+        outputs = []
+        for unit in units:
+            _wait_while_paused(should_pause, progress, index - 1, total)
+            batch = engine.translate_texts([unit])
+            if len(batch) != 1:
+                raise RuntimeError("Quality Translation returned an incomplete batch")
+            output = batch[0].strip()
+            if not output:
+                raise RuntimeError(f"Quality Translation returned empty text for page {page or 'document'}")
+            outputs.append(output)
         translated_text = "\n\n".join(
             output.strip() for output in outputs if output.strip()
         ).strip()
@@ -875,8 +891,17 @@ def next_passive_translation(
     translator=None,
     available_pairs=None,
     should_pause: Callable[[], bool] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict | None:
     """Translate at most one EN/UK document without downloading models in the background."""
+    if not bool(settings.translation.get("passive_enabled", True)) or (should_stop and should_stop()):
+        return None
+
+    def passive_pause() -> bool:
+        if should_stop and should_stop():
+            raise _PassiveTranslationStopped()
+        return bool(should_pause and should_pause())
+
     argos_pairs = set(available_pairs) if available_pairs is not None else (
         installed_pairs() if argos_available() else set()
     )
@@ -917,16 +942,22 @@ def next_passive_translation(
             ):
                 continue
 
-        return translate_document(
-            settings,
-            db,
-            sha256,
-            source_lang=src,
-            target_lang="ru",
-            translator=translator,
-            progress=progress,
-            allow_model_install=False,
-            should_pause=should_pause,
-            engine=selected_engine,
-        )
+        try:
+            passive_pause()
+            return translate_document(
+                settings,
+                db,
+                sha256,
+                source_lang=src,
+                target_lang="ru",
+                translator=translator,
+                progress=progress,
+                allow_model_install=False,
+                should_pause=passive_pause,
+                engine=selected_engine,
+            )
+        except _PassiveTranslationStopped:
+            if progress:
+                progress(0, 0, "Passive translation disabled; document remains queued")
+            return None
     return None

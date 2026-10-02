@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -15,7 +16,7 @@ def _layout(title: str, body: str) -> str:
 <style>{CSS}</style>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.24</span></a><nav>
+<header class="topbar"><a class="brand" href="/">OSINT Local <span>v0.9.25</span></a><nav>
 <a href="/search">Search</a><a href="/ask">Ask</a><a href="/chat">Chat</a><a href="/documents">Documents</a><a href="/corpus-dashboard">Dashboard</a><a href="/taxonomy">Corpus</a><a href="/analysis">Analysis</a><a href="/entities">Entities</a><a href="/timeline">Timeline</a><a href="/system">System</a><a href="/settings">Settings</a>
 </nav></header>
 <main>{body}</main>
@@ -206,6 +207,19 @@ def _system_panel(status: dict, csrf_token: str) -> str:
     background_state = "Paused for interactive work" if status.get("interactive_busy") else (
         "On" if status.get("background_enabled") else "Off"
     )
+    passive_enabled = bool(status.get("passive_translation_enabled", True))
+    configured_model = str(status.get("ollama_configured_model") or "")
+    model_options = "".join(
+        f'<option value="{_e(model)}"{" selected" if model == configured_model else ""}>{_e(model)}</option>'
+        for model in ollama_models
+    )
+    if configured_model and configured_model not in ollama_models:
+        model_options = f'<option selected disabled>{_e(configured_model)} (unavailable)</option>' + model_options
+    model_form = (
+        f'<form action="/settings/qa-model" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}">'
+        f'<select name="model" aria-label="Local Ollama model">{model_options}</select> '
+        '<button type="submit">Apply model</button></form>'
+    ) if ollama_models else '<span class="panel-subtle">Start Ollama to select a model.</span>'
 
     def fast_pair(lang: str, label: str) -> str:
         pair = f"{lang}->ru"
@@ -280,6 +294,8 @@ def _system_panel(status: dict, csrf_token: str) -> str:
 <div><span>Adaptive taxonomy</span><strong>{int(status.get("taxonomy_categories", 0))} categories · {int(status.get("taxonomy_topics", 0))} topics</strong><small>{"Rebuild needed" if status.get("taxonomy_stale") else "Current"} · <a href="/taxonomy">Open Corpus</a></small></div>
 <div><span>Corpus evidence</span><strong>{int(status.get("evidence_total", 0))} items · {int(status.get("evidence_documents", 0))} documents</strong><small>{"Refresh needed" if status.get("analysis_stale") else "Current"} · <a href="/analysis">Open Analysis</a></small></div>
 </div>
+<div class="settings-row"><div><span class="setting-label">Passive translation</span><strong>{"On" if passive_enabled else "Off"}</strong><p>Stops at the next safe batch boundary. Saved translations and the queue are kept. Manual translation remains available.</p></div><div class="settings-actions"><form action="/settings/passive-translation" method="post"><input type="hidden" name="csrf" value="{_e(csrf_token)}"><input type="hidden" name="enabled" value="{"false" if passive_enabled else "true"}"><button type="submit">Turn {"Off" if passive_enabled else "On"}</button></form></div></div>
+<div class="settings-row"><div><span class="setting-label">Ask / Chat model</span><strong>{_e(configured_model or "Automatic")}</strong><p>Choose an installed local model for new questions. Ask reads original EN/UK/RU fragments and does not require translated documents.</p></div><div class="settings-actions">{model_form}</div></div>
 </section>
 <section class="panel fast-translation-panel">
 <div class="panel-head"><div><h2>Fast Translation</h2><span class="panel-subtle">CTranslate2 INT8 · batched CPU translation</span></div></div>
@@ -494,9 +510,19 @@ def _qa_answer(result, error: str = "", fallback_hits=None) -> str:
             "contradictions": "Противоречия",
         }
         mode_label = mode_labels.get(getattr(result, "mode", "quick"), "Быстро")
-        parts.append('<section class="panel qa-answer"><div class="panel-head"><div><h2>Answer</h2><span class="panel-subtle">Local model · ' + _e(result.model) + ' · ' + _e(mode_label) + '</span></div></div>')
-        parts.append(f'<div class="answer-text">{_e(result.answer)}</div></section>')
+        model_label = 'Local model · ' + _e(result.model) if result.model else 'Local search'
+        parts.append('<section class="panel qa-answer"><div class="panel-head"><div><h2>Answer</h2><span class="panel-subtle">' + model_label + ' · ' + _e(mode_label) + '</span></div></div>')
         hits = result.sources
+        answer_html = re.sub(
+            r"\[(\d+)\]",
+            lambda match: f'<a href="#qa-source-{int(match.group(1))}">{match.group(0)}</a>'
+            if 1 <= int(match.group(1)) <= len(hits) else match.group(0),
+            _e(result.answer),
+        )
+        parts.append(f'<div class="answer-text">{answer_html}</div>')
+        for warning in getattr(result, "warnings", []):
+            parts.append(f'<div class="ask-filter-note">{_e(warning)}</div>')
+        parts.append('</section>')
     else:
         hits = fallback_hits or []
     if hits:
@@ -504,7 +530,7 @@ def _qa_answer(result, error: str = "", fallback_hits=None) -> str:
         for index, hit in enumerate(hits, 1):
             page = f" · p.{hit.page}" if hit.page is not None else ""
             link = f'/documents/{hit.document_sha256}' + (f'?page={hit.page}#reader' if hit.page is not None else '#reader')
-            parts.append(f'<a class="qa-source" href="{link}"><b>[{index}]</b><span>{_e(hit.source_path + page)}</span></a>')
+            parts.append(f'<a class="qa-source" id="qa-source-{index}" href="{link}"><b>[{index}]</b><span>{_e(hit.source_path + page)}<small style="display:block">{_e(hit.text[:500])}{"…" if len(hit.text) > 500 else ""}</small></span></a>')
         parts.append('</div></section>')
     return "".join(parts)
 
@@ -528,7 +554,7 @@ def _reader_panel(sha256: str, reader, source_url: str) -> str:
     if translation:
         right = f'<pre>{_e(translation)}</pre>'
     else:
-        right = '<div class="reader-empty">Russian translation is not ready yet. Passive translation will pick eligible EN/UK documents one at a time while the app is open.</div>'
+        right = '<div class="reader-empty">Russian translation is not ready yet. Translate this document manually, or enable Passive translation in System.</div>'
     return f"""<section class="panel reader-panel" id="reader">
 <div class="panel-head"><div><h2>Reader</h2><span class="panel-subtle">{_e(page_label)} · original ↔ Russian</span></div><div class="reader-nav">{prev_link}<a href="{source_link}" target="_blank" rel="noreferrer">Open source</a>{next_link}</div></div>
 <div class="reader-grid"><div><div class="reader-label">Original</div><pre>{_e(page.original)}</pre></div><div><div class="reader-label">Русский</div>{right}</div></div>

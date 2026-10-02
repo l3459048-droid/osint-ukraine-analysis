@@ -774,6 +774,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._set_input_dir_action()
             elif path == "/settings/performance":
                 self._set_performance_action()
+            elif path == "/settings/passive-translation":
+                self._set_passive_translation_action()
+            elif path == "/settings/qa-model":
+                self._set_qa_model_action()
             elif path == "/settings/pick-folder":
                 self._pick_folder_action()
             else:
@@ -1483,6 +1487,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "semantic_available": semantic_available,
             "index_pending": max(0, int(stats["chunks"]) - int(stats["embedding_count"])),
             "translation_queue": queue,
+            "passive_translation_enabled": bool(self.settings.translation.get("passive_enabled", True)),
             "argos_available": argos_available(),
             "fast_translation_available": fast_translation_available(),
             "interactive_busy": self.server.interactive.active(),
@@ -1949,6 +1954,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
             {"action": setup, "quality_setup": setup},
             status=HTTPStatus.ACCEPTED,
         )
+
+    def _set_qa_model_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        model = data.get("model", "").strip()
+        try:
+            models = ollama_models(str(self.settings.qa.get("base_url") or "http://127.0.0.1:11434"))
+        except RuntimeError as exc:
+            self._action_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not model or model not in models:
+            self._action_response({"error": "Choose an installed local Ollama model."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        update_config(self.settings.config_path, {"qa": {"model": model}})
+        settings = load_settings(self.settings.config_path)
+        self.server.pipeline.settings = settings
+        self.server.settings = settings
+        if self.headers.get("X-Requested-With") == "fetch":
+            self._json({"ok": True, "model": model})
+            return
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/system")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def _set_passive_translation_action(self) -> None:
+        data = self._form_data()
+        if not self._check_csrf(data):
+            self._action_response({"error": "Invalid action token. Refresh the page and try again."}, status=HTTPStatus.FORBIDDEN)
+            return
+        value = data.get("enabled", "").strip().casefold()
+        if value not in {"true", "false"}:
+            self._action_response({"error": "Choose On or Off for passive translation."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        enabled = value == "true"
+        update_config(self.settings.config_path, {"translation": {"passive_enabled": enabled}})
+        settings = load_settings(self.settings.config_path)
+        self.server.pipeline.settings = settings
+        self.server.settings = settings
+        if self.headers.get("X-Requested-With") == "fetch":
+            self._json({"ok": True, "passive_translation_enabled": enabled})
+            return
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/system")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _set_performance_action(self) -> None:
         data = self._form_data()

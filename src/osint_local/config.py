@@ -205,6 +205,8 @@ DEFAULT_CONFIG = {
         "top_k": 5,
         "max_context_chars": 6500,
         "num_ctx": 4096,
+        "max_answer_tokens": 768,
+        "temperature": 0.1,
         "think": False,
         "keep_alive": 0,
         "chat_history_chars": 6000,

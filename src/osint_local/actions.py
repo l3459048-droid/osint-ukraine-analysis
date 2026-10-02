@@ -385,9 +385,16 @@ class ActionManager:
                 )
 
         translated: list[str] = []
-        if bool(settings.translation.get("passive_enabled", True)):
+        def passive_stopped() -> bool:
+            # UI settings replace the Settings object; read the live value at
+            # each batch boundary instead of the cycle's captured settings.
+            return not bool(self.pipeline.settings.translation.get("passive_enabled", True))
+
+        if not passive_stopped():
             max_per_cycle = max(1, min(5, int(settings.translation.get("max_per_cycle", 1))))
             for item_index in range(max_per_cycle):
+                if passive_stopped():
+                    break
                 self._progress(
                     item_index,
                     max_per_cycle,
@@ -401,6 +408,7 @@ class ActionManager:
                     self.pipeline.db,
                     progress=lambda current, total, message: self._progress(current, total, message),
                     should_pause=self.interactive_busy,
+                    should_stop=passive_stopped,
                 )
                 if not item:
                     break

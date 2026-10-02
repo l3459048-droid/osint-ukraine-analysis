@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import time
 from datetime import datetime, timezone
@@ -227,6 +228,8 @@ def _validate_quality_model_files(
         translated = str(sp.decode(tokens) or "").strip()
         if not translated:
             raise RuntimeError("model returned an empty validation translation")
+        if translated.casefold() == source_text.casefold() or not re.search(r"[А-Яа-яЁё]", translated):
+            raise RuntimeError("EN→RU self-test did not return Russian text")
     except Exception as exc:
         raise RuntimeError(f"Quality model self-test failed: {exc}") from exc
 
@@ -398,6 +401,7 @@ class QualityTranslator:
             int(settings.translation.get("quality_batch_tokens", 1024) or 1024),
         )
         self.literal_segment_fallbacks = 0
+        self.quality_warnings = 0
         self.translator = ctranslate2.Translator(
             str(self.model_dir),
             device="cpu",
@@ -453,24 +457,39 @@ class QualityTranslator:
             max_input_length=self.max_input_tokens,
             max_decoding_length=max_decoding_length,
         )
+        if len(results) != len(windows):
+            raise RuntimeError("Quality Translation returned an incomplete batch; retry the document")
 
         decoded: list[str] = []
-        for result in results:
+        for index, result in enumerate(results, 1):
             pieces = list(result.hypotheses[0] if result.hypotheses else [])
-            if pieces and pieces[0] == target_token:
-                pieces = pieces[1:]
+            pieces = [token for token in pieces if token not in {target_token, "</s>", "<pad>"}]
             value = self.sp.decode(pieces).strip()
-            if value:
-                decoded.append(value)
+            if not value:
+                raise RuntimeError(f"Quality Translation returned an empty segment ({index}/{len(windows)}); retry the document")
+            # A decoder that exhausted its token budget can silently return
+            # half a sentence. Preserve the old artifact instead of publishing
+            # an apparently complete translation with omitted source content.
+            if len(result.hypotheses[0]) >= max_decoding_length:
+                raise RuntimeError(f"Quality Translation reached the decoding limit ({index}/{len(windows)}); shorten quality_segment_tokens")
+            decoded.append(value)
         return " ".join(decoded).strip()
 
     def translate_text(self, text: str) -> str:
+        # Keep form fillers, numeric cells and punctuation without inference.
+        # They contain no prose to translate and must not disappear from layout.
+        if not any(character.isalpha() for character in str(text)):
+            return str(text).strip()
         translated, placeholders_intact = translate_preserving_literals(
             str(text),
             self._translate_raw,
         )
         if not placeholders_intact:
             self.literal_segment_fallbacks += 1
+        from .fast_translation import _translation_quality_score
+
+        if _translation_quality_score(str(text), translated, target_lang=self.target_lang) >= 4:
+            self.quality_warnings = getattr(self, "quality_warnings", 0) + 1
         return translated.strip()
 
     def translate_texts(self, texts: Sequence[str]) -> list[str]:
